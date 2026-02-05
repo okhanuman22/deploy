@@ -18,7 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/okhanuman22/deploy/install.sh | sud
 ```
 - или
 ```bash
-wget https://gist.githubusercontent.com/.../xray-install.sh -O install.sh
+wget https://gist.githubusercontent.com/okhanuman22/deploy/install.sh -O install.sh
 chmod +x install.sh
 sudo ./install.sh
 ```
