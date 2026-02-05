@@ -14,9 +14,13 @@
 
 ### 🚀 Как использовать:
 ```bash
-wget https://gist.githubusercontent.com/.../xray-install.sh -O xray-install.sh
-chmod +x xray-install.sh
-sudo ./xray-install.sh
+curl -fsSL https://raw.githubusercontent.com/okhanuman22/deploy/install.sh | sudo -E bash
+```
+- или
+```bash
+wget https://gist.githubusercontent.com/.../xray-install.sh -O install.sh
+chmod +x install.sh
+sudo ./install.sh
 ```
 
 ### 👥 Управление пользователями:
