@@ -18,7 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/okhanuman22/deploy/main/install.sh 
 ```
 - или
 ```bash
-wget https://gist.githubusercontent.com/okhanuman22/deploy/main/install.sh -O install.sh
+wget https://gist.githubusercontent.com/okhanuman22/deploy/install.sh -O install.sh
 chmod +x install.sh
 sudo ./install.sh
 ```
