@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# Xray VLESS/XHTTP/Reality Installer (v3.5 — исправлены все баги)
+# Xray VLESS/XHTTP/Reality Installer (v3.8 — исправлен stdout/stderr, QR-код, финальная сводка)
 # ============================================================================
 DARK_GRAY='\033[38;5;242m'
 SOFT_BLUE='\033[38;5;67m'
@@ -36,7 +36,6 @@ ${SOFT_RED}✗${RESET} ${BOLD}${1}${RESET}
 print_info() { echo -e "${LIGHT_GRAY}ℹ${RESET} ${1}"; log "INFO: $1"; }
 print_substep() { echo -e "${MEDIUM_GRAY}  →${RESET} ${1}"; log "SUBSTEP: $1"; }
 
-# ИСПРАВЛЕНО: убрана цветовая разметка из отладочных сообщений
 print_debug() { 
   echo "[DEBUG] $1" >&2
   log "DEBUG: $1"
@@ -259,16 +258,25 @@ EOF
     print_warning "Fail2Ban запущен в фоне"
 }
 
+sanitize_domain() {
+  local input="$1"
+  input=$(echo "$input" | tr -d '\r\n\t' | xargs 2>/dev/null || echo "$input")
+  input="${input%:}"
+  echo "$input"
+}
+
 prompt_domain() {
   print_step "Домен"
   
   if [[ -n "$DOMAIN" ]]; then
-    validate_and_set_domain "$DOMAIN"
+    DOMAIN=$(sanitize_domain "$DOMAIN")
+    validate_domain "$DOMAIN"
     return
   fi
   
   if [[ -f "$XRAY_CONFIG" ]] && command -v jq &>/dev/null; then
     local existing_domain=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0] // ""' "$XRAY_CONFIG" 2>/dev/null || echo "")
+    existing_domain=$(sanitize_domain "$existing_domain")
     if [[ -n "$existing_domain" && "$existing_domain" != "null" && "$existing_domain" != "example.com" && "$existing_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
       export DOMAIN="$existing_domain"
       SERVER_IP=$(get_public_ip)
@@ -285,18 +293,17 @@ prompt_domain() {
     print_error "Не удалось прочитать домен из терминала"
   fi
   
-  input_domain=$(echo "$input_domain" | tr -d '[:space:]')
+  input_domain=$(sanitize_domain "$input_domain")
+  
   [[ -z "$input_domain" ]] && print_error "Домен не может быть пустым"
   [[ ! "$input_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]] && \
     print_error "Неверный формат домена (пример: ваш-домен.duckdns.org)"
   
-  validate_and_set_domain "$input_domain"
+  validate_domain "$input_domain"
 }
 
-validate_and_set_domain() {
+validate_domain() {
   local input_domain="$1"
-  [[ ! "$input_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]] && \
-    print_error "Неверный формат домена: ${input_domain}"
   
   local ipv4=$(host -t A "$input_domain" 2>/dev/null | awk '/has address/ {print $4; exit}' || echo "")
   if [[ -n "$ipv4" ]]; then
@@ -464,7 +471,7 @@ install_caddy() {
 configure_caddy() {
   print_substep "Настройка Caddy"
   
-  [[ -z "${DOMAIN:-}" ]] && print_error "DOMAIN не установлен! Запустите скрипт с DOMAIN=ваш-домен или введите при запросе"
+  [[ -z "${DOMAIN:-}" ]] && print_error "DOMAIN не установлен!"
   
   mkdir -p /var/log/caddy
   chown -R caddy:caddy /var/log/caddy
@@ -550,80 +557,87 @@ install_xray() {
   print_success "Xray установлен (${version})"
 }
 
+# ИСПРАВЛЕНО: функция возвращает ТОЛЬКО UUID в stdout, все сообщения в stderr
 generate_uuid_safe() {
-  print_substep "Проверка энтропии"
+  # Все выводы информации в stderr (>&2), только UUID в stdout
+  echo "[DEBUG] Проверка энтропии" >&2
+  
   local avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo "0")
   
   if [[ "$avail" -lt 200 ]]; then
-    print_warning "Низкая энтропия (${avail} бит). Устанавливаем haveged..."
+    echo "⚠ Низкая энтропия (${avail} бит). Устанавливаем haveged..." >&2
     ensure_dependency "haveged" "haveged"
     systemctl start haveged &>/dev/null || true
     sleep 2
     avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo "0")
-    print_info "Энтропия: ${avail} бит"
+    echo "ℹ Энтропия: ${avail} бит" >&2
   else
-    print_info "Энтропия достаточна (${avail} бит)"
+    echo "ℹ Энтропия достаточна (${avail} бит)" >&2
   fi
   
-  print_info "Генерация UUID через 'xray uuid' (таймаут 20 сек)..."
+  echo "ℹ Генерация UUID через 'xray uuid' (таймаут 20 сек)..." >&2
+  
   local uuid
   if ! uuid=$(timeout 20 xray uuid 2>/dev/null); then
-    print_error "Генерация UUID превысила 20 секунд.
-Возможные причины:
-• Недостаток энтропии (установлен haveged, но требуется время)
-• Проблемы с /dev/random
-Решение: выполните вручную 'xray uuid' и перезапустите скрипт"
+    echo "✗ Генерация UUID превысила 20 секунд." >&2
+    echo "Возможные причины:" >&2
+    echo "• Недостаток энтропии (установлен haveged, но требуется время)" >&2
+    echo "• Проблемы с /dev/random" >&2
+    echo "Решение: выполните вручную 'xray uuid' и перезапустите скрипт" >&2
+    exit 1
   fi
   
-  [[ -z "$uuid" || ! "$uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] && \
-    print_error "Некорректный UUID: '$uuid'"
+  if [[ -z "$uuid" || ! "$uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+    echo "✗ Некорректный UUID: '$uuid'" >&2
+    exit 1
+  fi
   
+  # Только UUID в stdout!
   echo "$uuid"
 }
 
 generate_xray_config() {
   print_substep "Генерация конфигурации"
   
-  print_debug "DOMAIN = [$DOMAIN]"
-  print_debug "Длина DOMAIN = ${#DOMAIN}"
-  
   if [[ -z "${DOMAIN:-}" ]]; then
-    print_error "CRITICAL: DOMAIN пустой! 
-Значение: [$DOMAIN]
-Длина: ${#DOMAIN}
-Запустите скрипт с: DOMAIN=ваш-домен.tld bash install.sh"
+    print_error "CRITICAL: DOMAIN пустой! Запустите скрипт с: DOMAIN=ваш-домен.tld bash install.sh"
   fi
   
-  # Очистка от двоеточия
-  if [[ "$DOMAIN" == *:* ]]; then
-    print_warning "DOMAIN содержит двоеточие в конце. Очистка..."
-    export DOMAIN="${DOMAIN%:}"
-    print_debug "DOMAIN после очистки = [$DOMAIN]"
-  fi
+  print_debug "DOMAIN = [$DOMAIN]"
   
   mkdir -p /usr/local/etc/xray "$XRAY_DAT_DIR"
   local secret_path uuid priv_key pub_key short_id
   
+  # Чтение параметров из файла с очисткой ANSI-кодов
   if [[ -f "$XRAY_KEYS" ]]; then
-    secret_path=$(grep "^path:" "$XRAY_KEYS" | awk '{print $2}' | sed 's|/||' 2>/dev/null || echo "")
-    uuid=$(grep "^uuid:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "")
-    priv_key=$(grep "^private_key:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "")
-    pub_key=$(grep "^public_key:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "")
-    short_id=$(grep "^short_id:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "")
+    secret_path=$(sed 's/\x1b\[[0-9;]*m//g' "$XRAY_KEYS" 2>/dev/null | grep "^path:" | awk '{print $2}' | sed 's|/||')
+    uuid=$(sed 's/\x1b\[[0-9;]*m//g' "$XRAY_KEYS" 2>/dev/null | grep "^uuid:" | awk '{print $2}')
+    priv_key=$(sed 's/\x1b\[[0-9;]*m//g' "$XRAY_KEYS" 2>/dev/null | grep "^private_key:" | awk '{print $2}')
+    pub_key=$(sed 's/\x1b\[[0-9;]*m//g' "$XRAY_KEYS" 2>/dev/null | grep "^public_key:" | awk '{print $2}')
+    short_id=$(sed 's/\x1b\[[0-9;]*m//g' "$XRAY_KEYS" 2>/dev/null | grep "^short_id:" | awk '{print $2}')
     
-    # ИСПРАВЛЕНО: проверка на пустой UUID
-    if [[ -n "$secret_path" && -n "$uuid" && -n "$priv_key" && -n "$pub_key" && -n "$short_id" && "$uuid" != "null" ]]; then
+    # Проверка UUID на валидность
+    if [[ -n "$secret_path" && -n "$uuid" && "$uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ && -n "$priv_key" && -n "$pub_key" && -n "$short_id" ]]; then
       print_info "Используются существующие параметры из ${XRAY_KEYS}"
     else
-      print_warning "Неполные или повреждённые параметры в ${XRAY_KEYS}, генерируем новые"
+      [[ -z "$secret_path" ]] && print_warning "path пустой или невалидный в .keys"
+      [[ -z "$uuid" ]] && print_warning "uuid пустой в .keys"
+      [[ -n "$uuid" && ! "$uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] && print_warning "uuid имеет неверный формат: [$uuid]"
+      [[ -z "$priv_key" ]] && print_warning "private_key пустой в .keys"
+      [[ -z "$pub_key" ]] && print_warning "public_key пустой в .keys"
+      [[ -z "$short_id" ]] && print_warning "short_id пустой в .keys"
+      
+      print_warning "Невалидные параметры в ${XRAY_KEYS}, генерируем новые"
       rm -f "$XRAY_KEYS" 2>/dev/null || true
     fi
   fi
   
+  # Генерация новых параметров если файл отсутствует или повреждён
   if [[ ! -f "$XRAY_KEYS" || ! -s "$XRAY_KEYS" ]]; then
     secret_path=$(openssl rand -hex 4 2>/dev/null)
     
-    print_info "Генерация UUID через 'xray uuid'..."
+    # ИСПРАВЛЕНО: generate_uuid_safe теперь выводит только UUID в stdout
+    print_info "Генерация UUID..."
     uuid=$(generate_uuid_safe)
     print_success "UUID сгенерирован: ${uuid:0:8}..."
     
@@ -641,164 +655,97 @@ ${key_pair}"
     
     short_id=$(openssl rand -hex 4 2>/dev/null || echo "a1b2c3d4")
     
+    # Запись в файл БЕЗ цветовых кодов
     {
-      echo "path: /${secret_path}"
-      echo "uuid: ${uuid}"
-      echo "private_key: ${priv_key}"
-      echo "public_key: ${pub_key}"
-      echo "short_id: ${short_id}"
+      printf 'path: /%s\n' "$secret_path"
+      printf 'uuid: %s\n' "$uuid"
+      printf 'private_key: %s\n' "$priv_key"
+      printf 'public_key: %s\n' "$pub_key"
+      printf 'short_id: %s\n' "$short_id"
     } > "$XRAY_KEYS"
     chmod 600 "$XRAY_KEYS"
     print_success "Сгенерированы новые параметры"
   fi
   
-  # ИСПРАВЛЕНО: повторное чтение параметров после генерации
-  if [[ -f "$XRAY_KEYS" ]]; then
-    secret_path=$(grep "^path:" "$XRAY_KEYS" | awk '{print $2}' | sed 's|/||' 2>/dev/null || echo "")
-    uuid=$(grep "^uuid:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "")
-    priv_key=$(grep "^private_key:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "")
-    pub_key=$(grep "^public_key:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "")
-    short_id=$(grep "^short_id:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "")
-    
-    # Критическая проверка UUID
-    if [[ -z "$uuid" || "$uuid" == "null" ]]; then
-      print_error "CRITICAL: UUID пустой после генерации! 
-Проверьте: 
-1. Достаточно ли энтропии: cat /proc/sys/kernel/random/entropy_avail
-2. Работает ли xray uuid: timeout 10 xray uuid"
-    fi
+  # Финальная проверка UUID
+  if [[ ! "$uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+    print_error "CRITICAL: UUID невалидный после всех проверок: [$uuid]
+Проверьте файл: $XRAY_KEYS
+Содержимое:
+$(cat "$XRAY_KEYS" 2>/dev/null || echo 'Файл недоступен')"
   fi
   
   local tmp_config="/tmp/xray-config-$$-${RANDOM}.json"
-  
-  # Экранирование для безопасности JSON
-  local escaped_uuid="${uuid//\"/\\\"}"
-  local escaped_domain="${DOMAIN//\"/\\\"}"
-  local escaped_priv_key="${priv_key//\"/\\\"}"
-  local escaped_short_id="${short_id//\"/\\\"}"
-  local escaped_secret_path="${secret_path//\"/\\\"}"
   
   print_debug "Генерация конфига с параметрами:"
   print_debug "  UUID: ${uuid:0:8}..."
   print_debug "  DOMAIN: ${DOMAIN}"
   print_debug "  Secret path: /${secret_path}"
   
-  # ИСПРАВЛЕНО: ПОЛНОСТЬЮ ВАЛИДНЫЙ JSON БЕЗ ЦВЕТОВЫХ КОДОВ
-  cat > "$tmp_config" <<EOF
-{
-  "log": {
-    "loglevel": "warning"
-  },
-  "routing": {
-    "domainStrategy": "IPIfNonMatch",
-    "rules": [
-      {
-        "type": "field",
-        "domain": [
-          "geosite:category-ads-all"
-        ],
-        "outboundTag": "block"
+  # Генерация JSON через jq
+  jq -n \
+    --arg uuid "$uuid" \
+    --arg domain "$DOMAIN" \
+    --arg secret_path "$secret_path" \
+    --arg priv_key "$priv_key" \
+    --arg short_id "$short_id" \
+    '{
+      "log": {"loglevel": "warning"},
+      "routing": {
+        "domainStrategy": "IPIfNonMatch",
+        "rules": [
+          {"type": "field", "domain": ["geosite:category-ads-all"], "outboundTag": "block"},
+          {"type": "field", "ip": ["geoip:private", "geoip:cn"], "outboundTag": "block"}
+        ]
       },
-      {
-        "type": "field",
-        "ip": [
-          "geoip:private",
-          "geoip:cn"
-        ],
-        "outboundTag": "block"
-      }
-    ]
-  },
-  "inbounds": [
-    {
-      "listen": "@xhttp",
-      "protocol": "vless",
-      "settings": {
-        "decryption": "none",
-        "clients": [
-          {
-            "id": "${escaped_uuid}",
-            "email": "main"
+      "inbounds": [
+        {
+          "listen": "@xhttp",
+          "protocol": "vless",
+          "settings": {
+            "decryption": "none",
+            "clients": [{"id": $uuid, "email": "main"}]
+          },
+          "streamSettings": {
+            "network": "xhttp",
+            "xhttpSettings": {"path": ("/" + $secret_path)}
+          },
+          "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"]}
+        },
+        {
+          "listen": "0.0.0.0",
+          "port": 443,
+          "protocol": "vless",
+          "settings": {
+            "decryption": "none",
+            "fallbacks": [{"dest": "@xhttp"}]
+          },
+          "streamSettings": {
+            "network": "tcp",
+            "security": "reality",
+            "realitySettings": {
+              "show": false,
+              "target": "127.0.0.1:8001",
+              "xver": 1,
+              "serverNames": [$domain],
+              "privateKey": $priv_key,
+              "shortIds": [$short_id]
+            }
           }
-        ]
-      },
-      "streamSettings": {
-        "network": "xhttp",
-        "xhttpSettings": {
-          "path": "/${escaped_secret_path}"
         }
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": [
-          "http",
-          "tls",
-          "quic"
-        ]
-      }
-    },
-    {
-      "listen": "0.0.0.0",
-      "port": 443,
-      "protocol": "vless",
-      "settings": {
-        "decryption": "none",
-        "fallbacks": [
-          {
-            "dest": "@xhttp"
-          }
-        ]
-      },
-      "streamSettings": {
-        "network": "tcp",
-        "security": "reality",
-        "realitySettings": {
-          "show": false,
-          "target": "127.0.0.1:8001",
-          "xver": 1,
-          "serverNames": [
-            "${escaped_domain}"
-          ],
-          "privateKey": "${escaped_priv_key}",
-          "shortIds": [
-            "${escaped_short_id}"
-          ]
-        }
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "protocol": "freedom",
-      "tag": "direct"
-    },
-    {
-      "protocol": "blackhole",
-      "tag": "block"
-    }
-  ]
-}
-EOF
-  
-  # Отладка содержимого БЕЗ ЦВЕТОВЫХ КОДОВ
-  print_debug "Содержимое временного файла (первые 20 строк):"
-  head -n 20 "$tmp_config" >&2
+      ],
+      "outbounds": [
+        {"protocol": "freedom", "tag": "direct"},
+        {"protocol": "blackhole", "tag": "block"}
+      ]
+    }' > "$tmp_config"
   
   if [[ ! -s "$tmp_config" ]]; then
     print_error "Временный файл конфигурации пустой"
   fi
   
-  local tmp_size=$(stat -c%s "$tmp_config" 2>/dev/null || echo 0)
-  print_debug "Размер временного файла: ${tmp_size} байт"
-  
-  # Установка jq если отсутствует
-  if ! command -v jq &>/dev/null; then
-    ensure_dependency "jq" "jq"
-  fi
-  
-  # Валидация JSON с подробным выводом ошибки
-  if ! jq empty "$tmp_config" &>/dev/null; then
-    print_error "Невалидный JSON в конфигурации. Ошибка jq:
+  if ! jq empty "$tmp_config" 2>/dev/null; then
+    print_error "Невалидный JSON в конфигурации:
 $(jq empty "$tmp_config" 2>&1 || echo 'Не удалось выполнить jq')
 Содержимое файла:
 $(cat "$tmp_config")"
@@ -807,14 +754,6 @@ $(cat "$tmp_config")"
   mv "$tmp_config" "$XRAY_CONFIG" || print_error "Не удалось переместить конфиг в ${XRAY_CONFIG}"
   chown root:root "$XRAY_CONFIG" 2>/dev/null || true
   chmod 644 "$XRAY_CONFIG"
-  
-  local final_size=$(stat -c%s "$XRAY_CONFIG" 2>/dev/null || echo 0)
-  print_debug "Размер финального файла: ${final_size} байт"
-  
-  if [[ "$final_size" -lt 500 ]]; then
-    print_error "Файл конфигурации слишком мал (<500 байт):
-$(cat "$XRAY_CONFIG" || echo 'Ошибка чтения файла')"
-  fi
   
   print_info "Валидация конфигурации Xray..."
   if ! xray run -test -c "$XRAY_CONFIG" &>/dev/null; then
@@ -898,35 +837,78 @@ set -euo pipefail
 XRAY_CONFIG="/usr/local/etc/xray/config.json"
 XRAY_KEYS="/usr/local/etc/xray/.keys"
 ACTION="${1:-help}"
+
+# Чтение параметров с очисткой ANSI-кодов
 get_params() {
   local sp pk sid dom port ip
-  sp=$(grep "^path:" "$XRAY_KEYS" | awk '{print $2}' | sed 's|/||' 2>/dev/null || echo "secret")
-  pk=$(grep "^public_key:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "pubkey")
-  sid=$(grep "^short_id:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "shortid")
+  sp=$(sed 's/\x1b\[[0-9;]*m//g' "$XRAY_KEYS" 2>/dev/null | grep "^path:" | awk '{print $2}' | sed 's|/||' || echo "secret")
+  pk=$(sed 's/\x1b\[[0-9;]*m//g' "$XRAY_KEYS" 2>/dev/null | grep "^public_key:" | awk '{print $2}' || echo "pubkey")
+  sid=$(sed 's/\x1b\[[0-9;]*m//g' "$XRAY_KEYS" 2>/dev/null | grep "^short_id:" | awk '{print $2}' || echo "shortid")
   dom=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0] // "example.com"' "$XRAY_CONFIG" 2>/dev/null)
   port=$(jq -r '.inbounds[1].port // "443"' "$XRAY_CONFIG" 2>/dev/null)
   ip=$(curl -4s https://icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}')
   echo "${sp}|${pk}|${sid}|${dom}|${port}|${ip}"
 }
+
 generate_link() {
   local uuid="$1" email="$2"
   IFS='|' read -r sp pk sid dom port ip < <(get_params 2>/dev/null || echo "|||example.com|443|127.0.0.1")
   echo "vless://${uuid}@${ip}:${port}?security=reality&encryption=none&pbk=${pk}&fp=chrome&sni=${dom}&sid=${sid}&type=xhttp&path=%2F${sp}%2F#${email}"
 }
+
 case "$ACTION" in
-  list) jq -r '.inbounds[0].settings.clients[] | "\(.email) (\(.id))"' "$XRAY_CONFIG" 2>/dev/null | nl -w3 -s'. ' || echo "Нет клиентов" ;;
-  qr) uuid=$(jq -r '.inbounds[0].settings.clients[] | select(.email=="main") | .id' "$XRAY_CONFIG" 2>/dev/null || echo ""); [[ -z "$uuid" ]] && exit 1; link=$(generate_link "$uuid" "main"); echo -e "\nСсылка:\n$link\n"; command -v qrencode &>/dev/null && echo "QR:" && echo "$link" | qrencode -t ansiutf8 ;;
-  add) read -p "Имя: " email < /dev/tty; [[ -z "$email" || "$email" =~ [^a-zA-Z0-9_-] ]] && exit 1; jq -e ".inbounds[0].settings.clients[] | select(.email==\"$email\")" "$XRAY_CONFIG" &>/dev/null && exit 1; uuid=$(xray uuid); jq --arg e "$email" --arg u "$uuid" '.inbounds[0].settings.clients += [{"id": $u, "email": $e}]' "$XRAY_CONFIG" > /tmp/x.tmp && mv /tmp/x.tmp "$XRAY_CONFIG"; systemctl restart xray &>/dev/null || true; link=$(generate_link "$uuid" "$email"); echo -e "\n✅ ${email} создан\nUUID: ${uuid}\nСсылка:\n$link"; command -v qrencode &>/dev/null && echo -e "\nQR:" && echo "$link" | qrencode -t ansiutf8 ;;
-  rm) mapfile -t cl < <(jq -r '.inbounds[0].settings.clients[].email' "$XRAY_CONFIG" 2>/dev/null || echo ""); [[ ${#cl[@]} -lt 2 ]] && exit 1; for i in "${!cl[@]}"; do echo "$((i+1)). ${cl[$i]}"; done; read -p "Номер: " n < /dev/tty; [[ ! "$n" =~ ^[0-9]+$ || "$n" -lt 1 || "$n" -gt ${#cl[@]} || "${cl[$((n-1))]}" == "main" ]] && exit 1; jq --arg e "${cl[$((n-1))]}" '(.inbounds[0].settings.clients) |= map(select(.email != $e))' "$XRAY_CONFIG" > /tmp/x.tmp && mv /tmp/x.tmp "$XRAY_CONFIG"; systemctl restart xray &>/dev/null || true; echo "✅ ${cl[$((n-1))]} удалён" ;;
-  link) mapfile -t cl < <(jq -r '.inbounds[0].settings.clients[].email' "$XRAY_CONFIG" 2>/dev/null || echo ""); [[ ${#cl[@]} -eq 0 ]] && exit 1; for i in "${!cl[@]}"; do echo "$((i+1)). ${cl[$i]}"; done; read -p "Номер: " n < /dev/tty; [[ ! "$n" =~ ^[0-9]+$ || "$n" -lt 1 || "$n" -gt ${#cl[@]} ]] && exit 1; uuid=$(jq -r --arg e "${cl[$((n-1))]}" '.inbounds[0].settings.clients[] | select(.email==$e) | .id' "$XRAY_CONFIG" 2>/dev/null || echo ""); [[ -z "$uuid" ]] && exit 1; link=$(generate_link "$uuid" "${cl[$((n-1))]}"); echo -e "\nСсылка:\n$link"; command -v qrencode &>/dev/null && echo -e "\nQR:" && echo "$link" | qrencode -t ansiutf8 ;;
-  *) cat <<HELP
+  list) 
+    jq -r '.inbounds[0].settings.clients[] | "\(.email) (\(.id))"' "$XRAY_CONFIG" 2>/dev/null | nl -w3 -s'. ' || echo "Нет клиентов" 
+    ;;
+  qr) 
+    uuid=$(jq -r '.inbounds[0].settings.clients[] | select(.email=="main") | .id' "$XRAY_CONFIG" 2>/dev/null || echo "")
+    [[ -z "$uuid" ]] && { echo "Ошибка: не найден UUID для main"; exit 1; }
+    link=$(generate_link "$uuid" "main")
+    echo -e "\nСсылка:\n$link\n"
+    command -v qrencode &>/dev/null && echo "QR:" && echo "$link" | qrencode -t ansiutf8 
+    ;;
+  add) 
+    read -p "Имя: " email < /dev/tty
+    [[ -z "$email" || "$email" =~ [^a-zA-Z0-9_-] ]] && { echo "Неверное имя"; exit 1; }
+    jq -e ".inbounds[0].settings.clients[] | select(.email==\"$email\")" "$XRAY_CONFIG" &>/dev/null && { echo "Пользователь существует"; exit 1; }
+    uuid=$(xray uuid)
+    jq --arg e "$email" --arg u "$uuid" '.inbounds[0].settings.clients += [{"id": $u, "email": $e}]' "$XRAY_CONFIG" > /tmp/x.tmp && mv /tmp/x.tmp "$XRAY_CONFIG"
+    systemctl restart xray &>/dev/null || true
+    link=$(generate_link "$uuid" "$email")
+    echo -e "\n✅ ${email} создан\nUUID: ${uuid}\nСсылка:\n$link"
+    command -v qrencode &>/dev/null && echo -e "\nQR:" && echo "$link" | qrencode -t ansiutf8 
+    ;;
+  rm) 
+    mapfile -t cl < <(jq -r '.inbounds[0].settings.clients[].email' "$XRAY_CONFIG" 2>/dev/null || echo "")
+    [[ ${#cl[@]} -lt 2 ]] && { echo "Нельзя удалить последнего пользователя"; exit 1; }
+    for i in "${!cl[@]}"; do echo "$((i+1)). ${cl[$i]}"; done
+    read -p "Номер: " n < /dev/tty
+    [[ ! "$n" =~ ^[0-9]+$ || "$n" -lt 1 || "$n" -gt ${#cl[@]} || "${cl[$((n-1))]}" == "main" ]] && { echo "Неверный выбор"; exit 1; }
+    jq --arg e "${cl[$((n-1))]}" '(.inbounds[0].settings.clients) |= map(select(.email != $e))' "$XRAY_CONFIG" > /tmp/x.tmp && mv /tmp/x.tmp "$XRAY_CONFIG"
+    systemctl restart xray &>/dev/null || true
+    echo "✅ ${cl[$((n-1))]} удалён" 
+    ;;
+  link) 
+    mapfile -t cl < <(jq -r '.inbounds[0].settings.clients[].email' "$XRAY_CONFIG" 2>/dev/null || echo "")
+    [[ ${#cl[@]} -eq 0 ]] && { echo "Нет клиентов"; exit 1; }
+    for i in "${!cl[@]}"; do echo "$((i+1)). ${cl[$i]}"; done
+    read -p "Номер: " n < /dev/tty
+    [[ ! "$n" =~ ^[0-9]+$ || "$n" -lt 1 || "$n" -gt ${#cl[@]} ]] && { echo "Неверный выбор"; exit 1; }
+    uuid=$(jq -r --arg e "${cl[$((n-1))]}" '.inbounds[0].settings.clients[] | select(.email==$e) | .id' "$XRAY_CONFIG" 2>/dev/null || echo "")
+    [[ -z "$uuid" ]] && { echo "UUID не найден"; exit 1; }
+    link=$(generate_link "$uuid" "${cl[$((n-1))]}")
+    echo -e "\nСсылка:\n$link"
+    command -v qrencode &>/dev/null && echo -e "\nQR:" && echo "$link" | qrencode -t ansiutf8 
+    ;;
+  *) 
+    cat <<HELP
 user list    Список клиентов
 user qr      QR основного пользователя
 user add     Новый пользователь
 user rm      Удалить пользователя
 user link    Ссылка для клиента
 HELP
-  ;;
+    ;;
 esac
 EOF_SCRIPT
   chmod +x /usr/local/bin/user
@@ -978,10 +960,18 @@ EOF_HELP
   print_success "Файл помощи: ${HELP_FILE}"
 }
 
+# ИСПРАВЛЕНО: функция для безопасного чтения параметров из .keys
+get_key_param() {
+  local param="$1"
+  if [[ -f "$XRAY_KEYS" ]]; then
+    sed 's/\x1b\[[0-9;]*m//g' "$XRAY_KEYS" 2>/dev/null | grep "^${param}:" | awk '{print $2}' | tr -d '\r\n'
+  fi
+}
+
 main() {
   echo -e "
 ${BOLD}${SOFT_BLUE}Xray VLESS/XHTTP/Reality Installer${RESET}"
-  echo -e "${LIGHT_GRAY}Исправлено: пустой UUID • Цветовые коды в JSON • Чтение параметров${RESET}"
+  echo -e "${LIGHT_GRAY}Исправлено: stdout/stderr • QR-код в финале • Валидация всех переменных${RESET}"
   echo -e "${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}
 "
   
@@ -1014,6 +1004,7 @@ ${BOLD}${SOFT_BLUE}Xray VLESS/XHTTP/Reality Installer${RESET}"
   ensure_dependency "iproute2" "ss"
   ensure_dependency "openssl" "openssl"
   ensure_dependency "haveged" "haveged"
+  ensure_dependency "qrencode" "qrencode"
   print_success "Все зависимости установлены"
   
   print_step "Маскировка"
@@ -1033,18 +1024,50 @@ ${BOLD}${SOFT_BLUE}Xray VLESS/XHTTP/Reality Installer${RESET}"
   create_user_utility
   create_help_file
   
+  # ИСПРАВЛЕНО: читаем параметры через функцию с очисткой
+  local final_uuid final_path final_domain final_ip final_pk final_sid
+  final_uuid=$(get_key_param "uuid")
+  final_path=$(get_key_param "path")
+  final_pk=$(get_key_param "public_key")
+  final_sid=$(get_key_param "short_id")
+  final_domain="$DOMAIN"
+  final_ip="$SERVER_IP"
+  
+  # Валидация финальных параметров
+  [[ -z "$final_uuid" ]] && final_uuid="ОШИБКА: UUID не найден"
+  [[ -z "$final_path" ]] && final_path="ОШИБКА: путь не найден"
+  [[ -z "$final_pk" ]] && final_pk="ОШИБКА: public_key не найден"
+  [[ -z "$final_sid" ]] && final_sid="ОШИБКА: short_id не найден"
+  
   echo -e "
 ${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
   echo -e "${BOLD}${SOFT_GREEN}✓ Установка завершена${RESET}"
   echo -e "${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}
 "
   
-  echo -e "${BOLD}Домен:${RESET}  https://${DOMAIN}"
-  echo -e "${BOLD}IP:${RESET}     ${SERVER_IP}"
-  echo -e "${BOLD}UUID:${RESET}   $(grep '^uuid:' ${XRAY_KEYS} 2>/dev/null | awk '{print $2}' | cut -c1-8)..."
-  echo -e "${BOLD}Путь:${RESET}   $(grep '^path:' ${XRAY_KEYS} 2>/dev/null | awk '{print $2}')"
+  echo -e "${BOLD}Домен:${RESET}     ${final_domain}"
+  echo -e "${BOLD}IP:${RESET}        ${final_ip}"
+  echo -e "${BOLD}UUID:${RESET}      ${final_uuid}"
+  echo -e "${BOLD}Путь:${RESET}      ${final_path}"
+  echo -e "${BOLD}PublicKey:${RESET} ${final_pk}"
+  echo -e "${BOLD}ShortID:${RESET}   ${final_sid}"
   echo
-  echo -e "Подключение: ${BOLD}user qr${RESET}"
+  
+  # Генерация и вывод QR-кода для основного пользователя
+  if [[ -n "$final_uuid" && "$final_uuid" != "ОШИБКА"* && -n "$final_pk" && "$final_pk" != "ОШИБКА"* ]]; then
+    local connection_link="vless://${final_uuid}@${final_ip}:443?security=reality&encryption=none&pbk=${final_pk}&fp=chrome&sni=${final_domain}&sid=${final_sid}&type=xhttp&path=%2F${final_path//\//}%2F#main"
+    
+    echo -e "${BOLD}Ссылка для подключения:${RESET}"
+    echo -e "${LIGHT_GRAY}${connection_link}${RESET}"
+    echo
+    echo -e "${BOLD}QR-код для мобильного приложения:${RESET}"
+    echo "$connection_link" | qrencode -t ansiutf8
+    echo
+  else
+    echo -e "${SOFT_RED}⚠ Не удалось сгенерировать QR-код из-за ошибок в параметрах${RESET}"
+  fi
+  
+  echo -e "Управление:   ${BOLD}user list${RESET} | ${BOLD}user add${RESET} | ${BOLD}user rm${RESET}"
   echo -e "Документация: ${BOLD}cat ~/help${RESET}"
   echo
   
@@ -1052,7 +1075,7 @@ ${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━�
     echo -e "${SOFT_YELLOW}⚠${RESET} Требуется перезагрузка: ${BOLD}reboot${RESET}"
   fi
   
-  echo -e "${SOFT_YELLOW}ℹ${RESET} SSL-сертификат будет получен автоматически при первом запросе к ${BOLD}https://${DOMAIN}${RESET}"
+  echo -e "${SOFT_YELLOW}ℹ${RESET} SSL-сертификат будет получен автоматически при первом запросе к ${BOLD}https://${final_domain}${RESET}"
   echo
   
   log "=== УСТАНОВКА ЗАВЕРШЕНА ==="
