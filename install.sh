@@ -629,7 +629,7 @@ EOF
 }
 
 # ============================================================================
-# Фаза 5: Установка и настройка Xray
+# Фаза 5: Установка и настройка Xray (с надёжной загрузкой)
 # ============================================================================
 
 install_xray() {
@@ -645,9 +645,24 @@ install_xray() {
   ensure_dependency "curl" "curl"
   ensure_dependency "unzip" "unzip"
   
-  # Основной метод установки
-  if ! bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install --version 24.11.20 2>/dev/null; then
-    print_warning "Официальный установщик не сработал, используется прямая загрузка..."
+  # Основной метод установки с повторными попытками
+  local install_success=false
+  for attempt in {1..3}; do
+    print_info "Попытка установки Xray (попытка ${attempt}/3)..."
+    if bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install --version 24.11.20 >/dev/null 2>&1; then
+      install_success=true
+      break
+    fi
+    sleep 2
+  done
+  
+  if [[ "$install_success" == false ]]; then
+    print_warning "Официальный установщик не сработал, используется резервный метод..."
+    
+    # Получение последней версии из GitHub API
+    local version
+    version=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep -oP '"tag_name": "\Kv[^"]+' || echo "v1.8.5")
+    print_info "Используется последняя версия: ${version}"
     
     # Определение архитектуры
     local arch
@@ -658,22 +673,51 @@ install_xray() {
       *) print_error "Неподдерживаемая архитектура: $(uname -m)" ;;
     esac
     
-    # Загрузка и установка
-    local version
-    version=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep -oP '"tag_name": "\Kv[^"]+')
-    mkdir -p /tmp/xray-install
-    cd /tmp/xray-install
+    # Создание временной директории
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    cd "$tmp_dir"
     
-    curl -sL "https://github.com/XTLS/Xray-core/releases/download/v${version}/Xray-linux-${arch}.zip" -o xray.zip
+    # Надёжная загрузка с повторными попытками
+    local download_success=false
+    for attempt in {1..5}; do
+      print_info "Загрузка Xray ${version} (попытка ${attempt}/5)..."
+      if curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 \
+        "https://github.com/XTLS/Xray-core/releases/download/${version}/Xray-linux-${arch}.zip" \
+        -o xray.zip; then
+        download_success=true
+        break
+      fi
+      sleep 3
+    done
+    
+    if [[ "$download_success" == false ]]; then
+      # Резервный источник (зеркало)
+      print_warning "Основной источник недоступен, пробуем зеркало..."
+      if curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 \
+        "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${arch}.zip" \
+        -o xray.zip; then
+        download_success=true
+      fi
+    fi
+    
+    if [[ "$download_success" == false ]]; then
+      rm -rf "$tmp_dir"
+      print_error "Не удалось загрузить Xray после 5 попыток. Проверьте сетевое подключение."
+    fi
+    
+    # Распаковка и установка
     unzip -o xray.zip xray >/dev/null 2>&1
     install -m 755 xray /usr/local/bin/
-    rm -rf /tmp/xray-install
+    rm -rf "$tmp_dir"
     
     # Создание системного пользователя
     id xray &>/dev/null || useradd -s /usr/sbin/nologin -r -d /usr/local/etc/xray xray
+    
+    print_success "Xray установлен вручную (версия: ${version})"
+  else
+    print_success "Xray установлен официальным установщиком (версия: $(xray version 2>/dev/null | head -n1 || echo 'unknown'))"
   fi
-  
-  print_success "Xray установлен (версия: $(xray version 2>/dev/null | head -n1 || echo 'unknown'))"
 }
 
 generate_xray_config() {
