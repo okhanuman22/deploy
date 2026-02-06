@@ -1,7 +1,7 @@
 ### 📁 Структура сайта:
 ```txt
 /var/www/html/
-    ├── index.html             # Главная страница
+    ├── index.html              # Главная страница
     ├── robots.txt
     ├── favicon.ico
     ├── about/
