@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ============================================================================
 # Xray VLESS/XHTTP/Reality Installer
-# Идемпотентная установка + обновление системы + одна маскировочная страница
+# Идемпотентная установка с обновлением системы + правильные оптимизации
 # ============================================================================
 
 # =============== ЦВЕТОВАЯ СХЕМА ===============
@@ -115,6 +115,43 @@ run_with_spinner() {
 }
 
 # ============================================================================
+# ИДЕМПОТЕНТНАЯ УСТАНОВКА ЗАВИСИМОСТЕЙ
+# ============================================================================
+ensure_dependency() {
+  local pkg="$1"
+  local cmd="${2:-$pkg}"
+  
+  # Проверка наличия команды или пакета
+  if [[ "$cmd" != "-" ]]; then
+    if command -v "$cmd" &>/dev/null; then
+      print_info "Зависимость '${pkg}' уже установлена"
+      return 0
+    fi
+  else
+    if dpkg -l | grep -q "^ii.* $pkg "; then
+      print_info "Пакет '${pkg}' уже установлен"
+      return 0
+    fi
+  fi
+  
+  print_info "Установка: ${pkg}..."
+  
+  # Установка с автоматической диагностикой ошибок
+  if ! run_with_spinner "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $pkg" "Установка ${pkg}" 0; then
+    print_error "Не удалось установить ${pkg}. См. детали выше."
+  fi
+  
+  # Финальная проверка
+  if [[ "$cmd" != "-" ]]; then
+    if ! command -v "$cmd" &>/dev/null; then
+      print_error "После установки ${pkg} команда '${cmd}' недоступна"
+    fi
+  fi
+  
+  print_success "Установлено: ${pkg}"
+}
+
+# ============================================================================
 # Глобальные переменные
 # ============================================================================
 
@@ -129,7 +166,7 @@ DOMAIN="${DOMAIN:-}"
 SERVER_IP=""
 
 # ============================================================================
-# Вспомогательные функции
+# Вспомогательные функции (определены ДО их использования)
 # ============================================================================
 
 check_root() {
@@ -211,38 +248,59 @@ prepare_system() {
 }
 
 # ============================================================================
-# ИДЕМПОТЕНТНАЯ ОПТИМИЗАЦИЯ SWAP
+# ИДЕМПОТЕНТНАЯ ОПТИМИЗАЦИЯ SWAP (ПРАВИЛЬНАЯ ЛОГИКА)
 # ============================================================================
 optimize_swap() {
   print_substep "Настройка swap-пространства"
   
-  # Проверка существования swap
+  # Проверка существования активного swap
   if swapon --show | grep -q .; then
-    print_info "Swap уже настроен"
+    print_info "Swap уже настроен и активен"
     return 0
   fi
   
   local total_mem
   total_mem=$(free -m | awk '/^Mem:/ {print $2}')
   
-  if [[ "$total_mem" -lt 2048 ]]; then
-    if [[ ! -f /swapfile ]]; then
-      local swap_size=$(( (2048 - total_mem) / 1024 + 1 ))
-      print_info "Создание ${swap_size}G swap (RAM: ${total_mem}M)..."
-      
-      if ! run_with_spinner "dd if=/dev/zero of=/swapfile bs=1G count=$swap_size status=none 2>/dev/null && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile" "Создание swap-файла" 0; then
-        print_error "Не удалось создать swap-файл"
-      fi
-      
-      grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
-      print_success "Swap настроен (${swap_size}G)"
-    else
-      print_info "Swap-файл существует, активация..."
-      swapon /swapfile 2>/dev/null || true
-      print_success "Swap активирован"
-    fi
+  # ПРАВИЛЬНАЯ ЛОГИКА РАСЧЁТА РАЗМЕРА SWAP
+  local swap_size_gb=0
+  if [[ "$total_mem" -le 1024 ]]; then
+    swap_size_gb=2
+    print_info "RAM ≤ 1 ГБ → настройка 2 ГБ swap"
+  elif [[ "$total_mem" -le 2048 ]]; then
+    swap_size_gb=1
+    print_info "RAM ≤ 2 ГБ → настройка 1 ГБ swap"
+  elif [[ "$total_mem" -le 4096 ]]; then
+    swap_size_gb=0.5
+    print_info "RAM ≤ 4 ГБ → настройка 512 МБ swap"
   else
-    print_info "Swap не требуется (достаточно RAM: ${total_mem}M)"
+    swap_size_gb=0.5
+    print_info "RAM > 4 ГБ → настройка 512 МБ swap (рекомендуется)"
+  fi
+  
+  # Создание swap-файла
+  if [[ ! -f /swapfile ]]; then
+    print_info "Создание ${swap_size_gb}G swap (RAM: ${total_mem}M)..."
+    
+    local bs_size count
+    if [[ "$swap_size_gb" == "0.5" ]]; then
+      bs_size="512M"
+      count=1
+    else
+      bs_size="1G"
+      count="$swap_size_gb"
+    fi
+    
+    if ! run_with_spinner "dd if=/dev/zero of=/swapfile bs=${bs_size} count=${count} status=none 2>/dev/null && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile" "Создание swap-файла" 0; then
+      print_error "Не удалось создать swap-файл"
+    fi
+    
+    grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    print_success "Swap настроен (${swap_size_gb}G)"
+  else
+    print_info "Swap-файл существует, активация..."
+    swapon /swapfile 2>/dev/null || true
+    print_success "Swap активирован"
   fi
 }
 
@@ -293,124 +351,41 @@ EOF
 }
 
 # ============================================================================
-# ИДЕМПОТЕНТНАЯ ОПТИМИЗАЦИЯ SSD (TRIM)
+# ИДЕМПОТЕНТНАЯ ОПТИМИЗАЦИЯ SSD (ПРОВЕРКА ЧЕРЕЗ lsblk --discard)
 # ============================================================================
 configure_trim() {
   print_substep "Проверка и настройка TRIM для SSD"
   
-  # Проверка наличия SSD
-  local ssd_count=0
-  ssd_count=$(lsblk -d -o NAME,ROTA 2>/dev/null | awk '$2 == "0" {count++} END {print count+0}' || echo 0)
+  # ПРОВЕРКА ПОДДЕРЖКИ TRIM ЧЕРЕЗ lsblk --discard
+  local trim_supported=0
+  if command -v lsblk &>/dev/null; then
+    trim_supported=$(lsblk --discard -no DISC-GRAN 2>/dev/null | awk '$1 != "0B" && $1 != "" {count++} END {print count+0}')
+  fi
   
-  if [[ "$ssd_count" -eq 0 ]]; then
-    print_info "SSD не обнаружены (только HDD), TRIM пропущен"
+  if [[ "$trim_supported" -eq 0 ]]; then
+    print_info "TRIM не поддерживается дисками или требуется ручная настройка"
     return 0
   fi
   
   # Проверка статуса fstrim.timer
   if systemctl is-active --quiet fstrim.timer 2>/dev/null; then
-    print_info "TRIM уже настроен и активен для ${ssd_count} SSD-диска(ов)"
+    print_info "TRIM уже настроен и активен (обнаружено ${trim_supported} диск(а) с поддержкой TRIM)"
     return 0
   fi
   
   # Активация TRIM
+  print_info "Обнаружено ${trim_supported} диск(а) с поддержкой TRIM"
+  
   if ! run_with_spinner "systemctl enable fstrim.timer --now" "Активация TRIM" 0; then
     print_warning "Не удалось активировать TRIM (продолжаем без него)"
     return 0
   fi
   
-  print_success "TRIM активирован для ${ssd_count} SSD-диска(ов)"
+  print_success "TRIM активирован для дисков с поддержкой"
 }
 
 # ============================================================================
-# ИДЕМПОТЕНТНАЯ НАСТРОЙКА ДОМЕНА
-# ============================================================================
-prompt_domain() {
-  print_step "Настройка домена"
-  
-  # 1. Переменная окружения
-  if [[ -n "$DOMAIN" ]]; then
-    print_info "Домен из переменной окружения: ${DOMAIN}"
-    validate_and_set_domain "$DOMAIN"
-    return
-  fi
-  
-  # 2. Существующая конфигурация
-  local existing_domain=""
-  if [[ -f "$XRAY_CONFIG" ]] && command -v jq &>/dev/null; then
-    existing_domain=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0] // empty' "$XRAY_CONFIG" 2>/dev/null || echo "")
-  fi
-  
-  if [[ -n "$existing_domain" && "$existing_domain" != "null" ]]; then
-    DOMAIN="$existing_domain"
-    print_info "Используется домен из конфигурации: ${DOMAIN}"
-    SERVER_IP=$(get_public_ip)
-    print_info "IP-адрес сервера: ${SERVER_IP}"
-    return
-  fi
-  
-  # 3. Интерактивный запрос
-  echo -e "${BOLD}Введите Ваш домен${RESET} (пример: wishnu.duckdns.org)"
-  echo -e "${LIGHT_GRAY}Домен должен быть привязан к IP-адресу этого сервера${RESET}"
-  
-  local input_domain=""
-  if ! read -r input_domain < /dev/tty 2>/dev/null; then
-    print_error "Не удалось прочитать домен из терминала. Укажите домен через переменную окружения:\n  DOMAIN=wishnu.duckdns.org sudo bash install.sh"
-  fi
-  
-  input_domain=$(echo "$input_domain" | tr -d '[:space:]')
-  
-  if [[ -z "$input_domain" ]]; then
-    print_error "Домен не может быть пустым"
-  fi
-  
-  if [[ ! "$input_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
-    print_error "Неверный формат домена (пример: ваш-домен.duckdns.org)"
-  fi
-  
-  validate_and_set_domain "$input_domain"
-}
-
-validate_and_set_domain() {
-  local input_domain="$1"
-  
-  if [[ ! "$input_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
-    print_error "Неверный формат домена: ${input_domain}"
-  fi
-  
-  local ipv4
-  ipv4=$(host -t A "$input_domain" 2>/dev/null | awk '/has address/ {print $4; exit}' || echo "")
-  
-  if [[ -n "$ipv4" ]]; then
-    print_success "DNS A-запись найдена: ${ipv4}"
-  else
-    local confirm=""
-    echo -e "${SOFT_YELLOW}⚠${RESET} DNS для ${BOLD}${input_domain}${RESET} не найден."
-    if read -p "Продолжить без проверки DNS? [y/N]: " confirm < /dev/tty 2>/dev/null; then
-      [[ ! "$confirm" =~ ^[Yy]$ ]] && print_error "Установка прервана"
-    else
-      print_warning "DNS не найден (продолжаем без проверки)"
-    fi
-  fi
-  
-  SERVER_IP=$(get_public_ip)
-  if [[ -n "$ipv4" && "$ipv4" != "$SERVER_IP" ]]; then
-    local confirm=""
-    echo -e "${SOFT_YELLOW}⚠${RESET} DNS (${ipv4}) ≠ IP сервера (${SERVER_IP})."
-    if read -p "Продолжить с несоответствующим DNS? [y/N]: " confirm < /dev/tty 2>/dev/null; then
-      [[ ! "$confirm" =~ ^[Yy]$ ]] && print_error "Установка прервана"
-    else
-      print_warning "DNS не соответствует IP сервера (продолжаем)"
-    fi
-  fi
-  
-  DOMAIN="$input_domain"
-  print_success "Домен: ${DOMAIN}"
-  print_info "IP-адрес сервера: ${SERVER_IP}"
-}
-
-# ============================================================================
-# ИДЕМПОТЕНТНАЯ НАСТРОЙКА ФАЕРВОЛА
+# ИДЕМПОТЕНТНАЯ НАСТРОЙКА ФАЕРВОЛА (ИСПРАВЛЕНА ОШИБКА С ПОРТАМИ)
 # ============================================================================
 configure_firewall() {
   print_substep "Настройка фаервола UFW"
@@ -429,16 +404,16 @@ configure_firewall() {
     fi
   fi
   
-  # Проверка активности
+  # Проверка активности и необходимых портов (ИСПРАВЛЕНА ОШИБКА)
   if ufw status | grep -q "Status: active"; then
     print_info "UFW уже активен"
     
-    # Проверка необходимых портов
-    local has_22=$(ufw status numbered | grep -c "22/tcp.*ALLOW" || echo 0)
-    local has_80=$(ufw status numbered | grep -c "80/tcp.*ALLOW" || echo 0)
-    local has_443=$(ufw status numbered | grep -c "443/tcp.*ALLOW" || echo 0)
+    # КОРРЕКТНАЯ ПРОВЕРКА ПОРТОВ (без синтаксической ошибки)
+    local has_22=$(ufw status | grep -c "22/tcp.*ALLOW" || echo 0)
+    local has_80=$(ufw status | grep -c "80/tcp.*ALLOW" || echo 0)
+    local has_443=$(ufw status | grep -c "443/tcp.*ALLOW" || echo 0)
     
-    if [[ "$has_22" -gt 0 && "$has_80" -gt 0 && "$has_443" -gt 0 ]]; then
+    if [[ $has_22 -gt 0 && $has_80 -gt 0 && $has_443 -gt 0 ]]; then
       print_success "Фаервол активен (порты 22/80/443 открыты)"
       return 0
     fi
@@ -638,6 +613,76 @@ EOF_SITE
 }
 
 # ============================================================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ============================================================================
+get_process_on_port() {
+  local port="$1"
+  local proto="${2:-tcp}"
+  
+  if command -v ss &>/dev/null; then
+    ss -nl"${proto:0:1}"p 2>/dev/null | awk -v port=":${port}" '$4 ~ port {print $7}' | head -n1 | cut -d',' -f2 | cut -d'=' -f2
+  elif command -v netstat &>/dev/null; then
+    netstat -nl"${proto:0:1}"p 2>/dev/null | awk -v port=":${port}" '$4 ~ port {print $7}' | head -n1 | cut -d'/' -f1
+  else
+    return 1
+  fi
+}
+
+free_ports() {
+  local ports=("80" "443")
+  local proto="tcp"
+  
+  print_substep "Очистка портов 80/443..."
+  
+  for port in "${ports[@]}"; do
+    local pid
+    pid=$(get_process_on_port "$port" "$proto" || echo "")
+    
+    if [[ -z "$pid" || "$pid" == "1" || "$pid" == "-" ]]; then
+      print_info "Порт ${port}/${proto} свободен"
+      continue
+    fi
+    
+    local proc_name
+    if command -v ps &>/dev/null; then
+      proc_name=$(ps -p "$pid" -o comm= 2>/dev/null || echo "PID ${pid}")
+    else
+      proc_name="PID ${pid}"
+    fi
+    
+    print_warning "Порт ${port}/${proto} занят: ${proc_name} (PID ${pid})"
+    
+    local stopped=false
+    for svc in nginx apache2 httpd caddy; do
+      if systemctl is-active --quiet "$svc" 2>/dev/null; then
+        print_info "Остановка ${svc}..."
+        systemctl stop "$svc" >/dev/null 2>&1 || true
+        systemctl disable "$svc" >/dev/null 2>&1 || true
+        stopped=true
+        break
+      fi
+    done
+    
+    if [[ "$stopped" == false ]]; then
+      print_info "Принудительная остановка PID ${pid}..."
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    
+    local attempts=0
+    while [[ -n "$(get_process_on_port "$port" "$proto" || echo "")" ]] && [[ $attempts -lt 5 ]]; do
+      sleep 1
+      ((attempts++))
+    done
+    
+    if [[ -n "$(get_process_on_port "$port" "$proto" || echo "")" ]]; then
+      print_error "Не удалось освободить порт ${port}/${proto}. Остановите процесс вручную: sudo kill -9 ${pid}"
+    fi
+    
+    print_success "Порт ${port}/${proto} освобождён"
+  done
+}
+
+# ============================================================================
 # УСТАНОВКА И НАСТРОЙКА CADDY (идемпотентная)
 # ============================================================================
 install_caddy() {
@@ -660,10 +705,7 @@ install_caddy() {
   
   # Установка зависимостей
   for pkg in debian-keyring debian-archive-keyring apt-transport-https curl gnupg; do
-    if ! command -v "${pkg//-/}" &>/dev/null && ! dpkg -l | grep -q "^ii.* $pkg "; then
-      run_with_spinner "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $pkg" "Установка $pkg" 0 || \
-        print_error "Не удалось установить $pkg"
-    fi
+    ensure_dependency "$pkg" "-"
   done
   
   # Импорт ключа
@@ -751,73 +793,90 @@ EOF
 }
 
 # ============================================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# НАСТРОЙКА ДОМЕНА
 # ============================================================================
-get_process_on_port() {
-  local port="$1"
-  local proto="${2:-tcp}"
+prompt_domain() {
+  print_step "Настройка домена"
   
-  if command -v ss &>/dev/null; then
-    ss -nl"${proto:0:1}"p 2>/dev/null | awk -v port=":${port}" '$4 ~ port {print $7}' | head -n1 | cut -d',' -f2 | cut -d'=' -f2
-  elif command -v netstat &>/dev/null; then
-    netstat -nl"${proto:0:1}"p 2>/dev/null | awk -v port=":${port}" '$4 ~ port {print $7}' | head -n1 | cut -d'/' -f1
-  else
-    return 1
+  # 1. Переменная окружения
+  if [[ -n "$DOMAIN" ]]; then
+    print_info "Домен из переменной окружения: ${DOMAIN}"
+    validate_and_set_domain "$DOMAIN"
+    return
   fi
+  
+  # 2. Существующая конфигурация
+  local existing_domain=""
+  if [[ -f "$XRAY_CONFIG" ]] && command -v jq &>/dev/null; then
+    existing_domain=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0] // empty' "$XRAY_CONFIG" 2>/dev/null || echo "")
+  fi
+  
+  if [[ -n "$existing_domain" && "$existing_domain" != "null" ]]; then
+    DOMAIN="$existing_domain"
+    print_info "Используется домен из конфигурации: ${DOMAIN}"
+    SERVER_IP=$(get_public_ip)
+    print_info "IP-адрес сервера: ${SERVER_IP}"
+    return
+  fi
+  
+  # 3. Интерактивный запрос
+  echo -e "${BOLD}Введите Ваш домен${RESET} (пример: wishnu.duckdns.org)"
+  echo -e "${LIGHT_GRAY}Домен должен быть привязан к IP-адресу этого сервера${RESET}"
+  
+  local input_domain=""
+  if ! read -r input_domain < /dev/tty 2>/dev/null; then
+    print_error "Не удалось прочитать домен из терминала. Укажите домен через переменную окружения:\n  DOMAIN=wishnu.duckdns.org sudo bash install.sh"
+  fi
+  
+  input_domain=$(echo "$input_domain" | tr -d '[:space:]')
+  
+  if [[ -z "$input_domain" ]]; then
+    print_error "Домен не может быть пустым"
+  fi
+  
+  if [[ ! "$input_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
+    print_error "Неверный формат домена (пример: ваш-домен.duckdns.org)"
+  fi
+  
+  validate_and_set_domain "$input_domain"
 }
 
-free_ports() {
-  local ports=("80" "443")
-  local proto="tcp"
+validate_and_set_domain() {
+  local input_domain="$1"
   
-  print_substep "Очистка портов 80/443..."
+  if [[ ! "$input_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
+    print_error "Неверный формат домена: ${input_domain}"
+  fi
   
-  for port in "${ports[@]}"; do
-    local pid
-    pid=$(get_process_on_port "$port" "$proto" || echo "")
-    
-    if [[ -z "$pid" || "$pid" == "1" || "$pid" == "-" ]]; then
-      print_info "Порт ${port}/${proto} свободен"
-      continue
-    fi
-    
-    local proc_name
-    if command -v ps &>/dev/null; then
-      proc_name=$(ps -p "$pid" -o comm= 2>/dev/null || echo "PID ${pid}")
+  local ipv4
+  ipv4=$(host -t A "$input_domain" 2>/dev/null | awk '/has address/ {print $4; exit}' || echo "")
+  
+  if [[ -n "$ipv4" ]]; then
+    print_success "DNS A-запись найдена: ${ipv4}"
+  else
+    local confirm=""
+    echo -e "${SOFT_YELLOW}⚠${RESET} DNS для ${BOLD}${input_domain}${RESET} не найден."
+    if read -p "Продолжить без проверки DNS? [y/N]: " confirm < /dev/tty 2>/dev/null; then
+      [[ ! "$confirm" =~ ^[Yy]$ ]] && print_error "Установка прервана"
     else
-      proc_name="PID ${pid}"
+      print_warning "DNS не найден (продолжаем без проверки)"
     fi
-    
-    print_warning "Порт ${port}/${proto} занят: ${proc_name} (PID ${pid})"
-    
-    local stopped=false
-    for svc in nginx apache2 httpd caddy; do
-      if systemctl is-active --quiet "$svc" 2>/dev/null; then
-        print_info "Остановка ${svc}..."
-        systemctl stop "$svc" >/dev/null 2>&1 || true
-        systemctl disable "$svc" >/dev/null 2>&1 || true
-        stopped=true
-        break
-      fi
-    done
-    
-    if [[ "$stopped" == false ]]; then
-      print_info "Принудительная остановка PID ${pid}..."
-      kill -9 "$pid" 2>/dev/null || true
+  fi
+  
+  SERVER_IP=$(get_public_ip)
+  if [[ -n "$ipv4" && "$ipv4" != "$SERVER_IP" ]]; then
+    local confirm=""
+    echo -e "${SOFT_YELLOW}⚠${RESET} DNS (${ipv4}) ≠ IP сервера (${SERVER_IP})."
+    if read -p "Продолжить с несоответствующим DNS? [y/N]: " confirm < /dev/tty 2>/dev/null; then
+      [[ ! "$confirm" =~ ^[Yy]$ ]] && print_error "Установка прервана"
+    else
+      print_warning "DNS не соответствует IP сервера (продолжаем)"
     fi
-    
-    local attempts=0
-    while [[ -n "$(get_process_on_port "$port" "$proto" || echo "")" ]] && [[ $attempts -lt 5 ]]; do
-      sleep 1
-      ((attempts++))
-    done
-    
-    if [[ -n "$(get_process_on_port "$port" "$proto" || echo "")" ]]; then
-      print_error "Не удалось освободить порт ${port}/${proto}. Остановите процесс вручную: sudo kill -9 ${pid}"
-    fi
-    
-    print_success "Порт ${port}/${proto} освобождён"
-  done
+  fi
+  
+  DOMAIN="$input_domain"
+  print_success "Домен: ${DOMAIN}"
+  print_info "IP-адрес сервера: ${SERVER_IP}"
 }
 
 # ============================================================================
@@ -835,10 +894,7 @@ install_xray() {
   fi
   
   # Установка curl если отсутствует
-  if ! command -v curl &>/dev/null; then
-    run_with_spinner "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl" "Установка curl" 0 || \
-      print_error "Не удалось установить curl"
-  fi
+  ensure_dependency "curl" "curl"
   
   # Установка Xray
   print_info "Загрузка официального установщика Xray..."
@@ -1113,8 +1169,7 @@ create_user_utility() {
   
   # Установка qrencode если отсутствует
   if ! command -v qrencode &>/dev/null; then
-    run_with_spinner "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends qrencode" "Установка qrencode" 0 || \
-      print_warning "Не удалось установить qrencode (QR-коды недоступны)"
+    ensure_dependency "qrencode" "qrencode"
   fi
   
   cat > /usr/local/bin/user <<'EOF_SCRIPT'
@@ -1267,8 +1322,12 @@ create_help_file() {
   • Сетевой стек: настроен для высокой нагрузки
   • Fail2Ban: защищает SSH (3 попытки → бан на 1 час)
   • UFW: фаервол активен (порты 22/80/443)
-  • TRIM: запланирован для SSD-накопителей (проверено наличие SSD)
-  • Swap: настроен автоматически при малом объёме RAM
+  • TRIM: активирован для дисков с поддержкой (проверка через lsblk --discard)
+  • Swap: настроен по правилам:
+      ≤ 1 ГБ RAM → 2 ГБ swap
+      ≤ 2 ГБ RAM → 1 ГБ swap
+      ≤ 4 ГБ RAM → 512 МБ swap
+      > 4 ГБ RAM → 512 МБ swap
 
 МАСКИРОВКА ТРАФИКА (схема steal-itself)
   • Публичные запросы → профессиональный лендинг (единая страница)
@@ -1337,17 +1396,13 @@ main() {
   configure_fail2ban
   
   # ============================================================================
-  # 6. УСТАНОВКА ЗАВИСИМОСТЕЙ
+  # 6. УСТАНОВКА ЗАВИСИМОСТЕЙ (все функции уже определены!)
   # ============================================================================
   print_step "Установка зависимостей"
   
   local deps=("curl" "jq" "socat" "git" "wget" "gnupg" "ca-certificates" "unzip" "iproute2" "openssl")
   for dep in "${deps[@]}"; do
-    if ! command -v "${dep}" &>/dev/null; then
-      ensure_dependency "$dep" "$dep"
-    else
-      print_info "Зависимость '${dep}' уже установлена"
-    fi
+    ensure_dependency "$dep" "$dep"
   done
   
   print_success "Все зависимости установлены"
