@@ -3,11 +3,7 @@
 /var/www/html/
     ├── index.html              # Главная страница
     ├── robots.txt
-    ├── favicon.ico
-    ├── about/
-    │     └── index.html        # Дополнительная страница
-    └── contact/
-          └── index.html        # Дополнительная страница
+    └── favicon.ico
 ```
 
 ### 🚀 Как использовать:
