@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# Xray VLESS/XHTTP/Reality Installer (v3.4 — валидный JSON + исправлены все баги)
+# Xray VLESS/XHTTP/Reality Installer (v3.5 — исправлены все баги)
 # ============================================================================
 DARK_GRAY='\033[38;5;242m'
 SOFT_BLUE='\033[38;5;67m'
@@ -35,7 +35,12 @@ ${SOFT_RED}✗${RESET} ${BOLD}${1}${RESET}
 }
 print_info() { echo -e "${LIGHT_GRAY}ℹ${RESET} ${1}"; log "INFO: $1"; }
 print_substep() { echo -e "${MEDIUM_GRAY}  →${RESET} ${1}"; log "SUBSTEP: $1"; }
-print_debug() { echo -e "${MEDIUM_GRAY}[DEBUG]${RESET} ${1}"; log "DEBUG: $1"; }
+
+# ИСПРАВЛЕНО: убрана цветовая разметка из отладочных сообщений
+print_debug() { 
+  echo "[DEBUG] $1" >&2
+  log "DEBUG: $1"
+}
 
 run_with_spinner() {
   local cmd="$1"
@@ -246,6 +251,7 @@ bantime = 1h
 findtime = 10m
 ignoreip = 127.0.0.1/8 ::1
 EOF
+
   systemctl enable fail2ban &>/dev/null || true
   systemctl start fail2ban &>/dev/null || true
   sleep 1
@@ -605,16 +611,16 @@ generate_xray_config() {
     pub_key=$(grep "^public_key:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "")
     short_id=$(grep "^short_id:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "")
     
-    if [[ -n "$secret_path" && -n "$uuid" && -n "$priv_key" && -n "$pub_key" && -n "$short_id" ]]; then
+    # ИСПРАВЛЕНО: проверка на пустой UUID
+    if [[ -n "$secret_path" && -n "$uuid" && -n "$priv_key" && -n "$pub_key" && -n "$short_id" && "$uuid" != "null" ]]; then
       print_info "Используются существующие параметры из ${XRAY_KEYS}"
     else
-      print_warning "Неполные параметры в ${XRAY_KEYS}, генерируем новые"
+      print_warning "Неполные или повреждённые параметры в ${XRAY_KEYS}, генерируем новые"
       rm -f "$XRAY_KEYS" 2>/dev/null || true
     fi
   fi
   
   if [[ ! -f "$XRAY_KEYS" || ! -s "$XRAY_KEYS" ]]; then
-    # ИСПРАВЛЕНО: безопасная генерация без проблем с pipefail
     secret_path=$(openssl rand -hex 4 2>/dev/null)
     
     print_info "Генерация UUID через 'xray uuid'..."
@@ -646,6 +652,23 @@ ${key_pair}"
     print_success "Сгенерированы новые параметры"
   fi
   
+  # ИСПРАВЛЕНО: повторное чтение параметров после генерации
+  if [[ -f "$XRAY_KEYS" ]]; then
+    secret_path=$(grep "^path:" "$XRAY_KEYS" | awk '{print $2}' | sed 's|/||' 2>/dev/null || echo "")
+    uuid=$(grep "^uuid:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "")
+    priv_key=$(grep "^private_key:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "")
+    pub_key=$(grep "^public_key:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "")
+    short_id=$(grep "^short_id:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "")
+    
+    # Критическая проверка UUID
+    if [[ -z "$uuid" || "$uuid" == "null" ]]; then
+      print_error "CRITICAL: UUID пустой после генерации! 
+Проверьте: 
+1. Достаточно ли энтропии: cat /proc/sys/kernel/random/entropy_avail
+2. Работает ли xray uuid: timeout 10 xray uuid"
+    fi
+  fi
+  
   local tmp_config="/tmp/xray-config-$$-${RANDOM}.json"
   
   # Экранирование для безопасности JSON
@@ -660,7 +683,7 @@ ${key_pair}"
   print_debug "  DOMAIN: ${DOMAIN}"
   print_debug "  Secret path: /${secret_path}"
   
-  # ИСПРАВЛЕНО: ПОЛНОСТЬЮ ВАЛИДНЫЙ JSON С ЗАПЯТЫМИ И КАВЫЧКАМИ
+  # ИСПРАВЛЕНО: ПОЛНОСТЬЮ ВАЛИДНЫЙ JSON БЕЗ ЦВЕТОВЫХ КОДОВ
   cat > "$tmp_config" <<EOF
 {
   "log": {
@@ -757,9 +780,9 @@ ${key_pair}"
 }
 EOF
   
-  # Отладка содержимого
+  # Отладка содержимого БЕЗ ЦВЕТОВЫХ КОДОВ
   print_debug "Содержимое временного файла (первые 20 строк):"
-  head -n 20 "$tmp_config" | sed "s/^/  ${MEDIUM_GRAY}│${RESET} /"
+  head -n 20 "$tmp_config" >&2
   
   if [[ ! -s "$tmp_config" ]]; then
     print_error "Временный файл конфигурации пустой"
@@ -958,7 +981,7 @@ EOF_HELP
 main() {
   echo -e "
 ${BOLD}${SOFT_BLUE}Xray VLESS/XHTTP/Reality Installer${RESET}"
-  echo -e "${LIGHT_GRAY}Исправлено: валидный JSON • Проблема с pipefail • Очистка DOMAIN${RESET}"
+  echo -e "${LIGHT_GRAY}Исправлено: пустой UUID • Цветовые коды в JSON • Чтение параметров${RESET}"
   echo -e "${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}
 "
   
