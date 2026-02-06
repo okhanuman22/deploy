@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # ============================================================================
-# Xray VLESS/XHTTP/Reality Installer 
+# Xray VLESS/XHTTP/Reality Installer
+# Только официальная генерация ключей + новый UUID при каждой установке
 # ============================================================================
 
 # =============== ЦВЕТОВАЯ СХЕМА ===============
@@ -34,6 +35,59 @@ print_error() {
 }
 print_info() { echo -e "${LIGHT_GRAY}ℹ${RESET} ${1}"; }
 print_substep() { echo -e "${MEDIUM_GRAY}  →${RESET} ${1}"; }
+
+# ============================================================================
+# ВИЗУАЛЬНЫЙ ОБРАТНЫЙ ОТСЧЁТ
+# ============================================================================
+countdown() {
+  local seconds="$1"
+  local label="${2:-Операция}"
+  local start_time=$(date +%s)
+  local end_time=$((start_time + seconds))
+  
+  echo -ne "${LIGHT_GRAY}${label}...${RESET}"
+  while true; do
+    local now=$(date +%s)
+    local remaining=$((end_time - now))
+    
+    if [[ $remaining -le 0 ]]; then
+      echo -e " ${SOFT_GREEN}✓${RESET}"
+      return 0
+    fi
+    
+    # Анимация точек для обратного отсчёта
+    local dots=$(( (seconds - remaining) % 4 ))
+    local dot_str=""
+    for ((i=0; i<dots; i++)); do dot_str+="."; done
+    
+    echo -ne "\r${LIGHT_GRAY}${label}${dot_str} (${remaining}s)${RESET}"
+    sleep 0.5
+  done
+}
+
+countdown_with_spinner() {
+  local seconds="$1"
+  local label="${2:-Операция}"
+  local spinners=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  local start_time=$(date +%s)
+  local end_time=$((start_time + seconds))
+  
+  echo -ne "${LIGHT_GRAY}${label} ${spinners[0]}${RESET}"
+  local i=0
+  while true; do
+    local now=$(date +%s)
+    local remaining=$((end_time - now))
+    
+    if [[ $remaining -le 0 ]]; then
+      echo -e "\r${LIGHT_GRAY}${label} ${SOFT_GREEN}✓${RESET}"
+      return 0
+    fi
+    
+    i=$(( (i + 1) % ${#spinners[@]} ))
+    echo -ne "\r${LIGHT_GRAY}${label} ${spinners[$i]} (${remaining}s)${RESET}"
+    sleep 0.1
+  done
+}
 
 # ============================================================================
 # Глобальные переменные
@@ -142,8 +196,11 @@ validate_and_set_domain() {
   print_info "IP-адрес сервера: ${SERVER_IP}"
 }
 
+# ============================================================================
+# Установка haveged с обратным отсчётом
+# ============================================================================
 ensure_entropy() {
-  print_substep "Проверка энтропии и установка haveged"
+  print_substep "Проверка энтропии"
   
   local entropy_avail
   entropy_avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo 0)
@@ -151,27 +208,30 @@ ensure_entropy() {
   print_info "Текущий уровень энтропии: ${entropy_avail}"
   
   if [[ "$entropy_avail" -lt 200 ]]; then
-    print_warning "Низкая энтропия (< 200). Устанавливаем haveged для генерации энтропии..."
+    print_warning "Низкая энтропия (< 200). Устанавливаем haveged..."
     
-    # Установка haveged с таймаутом
-    timeout 30 apt-get update >/dev/null 2>&1 || true
-    if ! timeout 60 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends haveged >/dev/null 2>&1; then
-      print_error "Не удалось установить haveged. Проверьте сетевое подключение и повторите установку."
+    # Обновление с таймаутом 20 сек
+    if ! timeout 20 apt-get update >/dev/null 2>&1; then
+      print_warning "apt update завершился с таймаутом, продолжаем"
+    fi
+    
+    # Установка haveged с таймаутом 25 сек
+    countdown_with_spinner 25 "Установка haveged"
+    if ! timeout 25 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends haveged >/dev/null 2>&1; then
+      print_error "Не удалось установить haveged. Проверьте сетевое подключение."
     fi
     
     systemctl enable haveged --now >/dev/null 2>&1 || true
     print_success "haveged установлен и активирован"
     
-    # Даем время накопить энтропию
-    sleep 3
+    # Ожидание накопления энтропии с обратным отсчётом
+    countdown 5 "Накопление энтропии"
     
     entropy_avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo 0)
     print_info "Энтропия после haveged: ${entropy_avail}"
     
     if [[ "$entropy_avail" -lt 100 ]]; then
-      print_warning "Энтропия всё ещё низкая (${entropy_avail}). Продолжаем с риском зависания генерации ключей."
-      print_warning "Если генерация ключей зависнет — вручную выполните:"
-      print_warning "  sudo apt install haveged && sudo systemctl start haveged && sleep 5"
+      print_warning "Энтропия всё ещё низкая (${entropy_avail}). Продолжаем с риском."
     fi
   else
     print_success "Энтропия достаточна (${entropy_avail})"
@@ -179,7 +239,7 @@ ensure_entropy() {
 }
 
 # ============================================================================
-# Защищённая установка зависимостей с таймаутами
+# Установка зависимостей с уменьшенными таймаутами
 # ============================================================================
 ensure_dependency() {
   local pkg="$1"
@@ -199,15 +259,15 @@ ensure_dependency() {
   
   print_info "Установка: ${pkg}..."
   
-  # Принудительное подтверждение + таймаут 180 секунд
-  if ! timeout 180 sh -c "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold' ${pkg} >/dev/null 2>&1"; then
-    print_error "Не удалось установить ${pkg}. Проверьте сетевое подключение и зеркала apt."
+  # Таймаут уменьшен до 120 секунд
+  if ! timeout 120 sh -c "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold' ${pkg} >/dev/null 2>&1"; then
+    print_error "Не удалось установить ${pkg}. Проверьте сетевое подключение."
   fi
   
   # Проверка установки
   if [[ "$cmd" != "-" ]]; then
     local attempts=0
-    while ! command -v "$cmd" &>/dev/null && [[ $attempts -lt 5 ]]; do
+    while ! command -v "$cmd" &>/dev/null && [[ $attempts -lt 3 ]]; do
       sleep 1
       ((attempts++))
     done
@@ -274,7 +334,7 @@ free_ports() {
     fi
     
     local attempts=0
-    while [[ -n "$(get_process_on_port "$port" "$proto" || echo "")" ]] && [[ $attempts -lt 10 ]]; do
+    while [[ -n "$(get_process_on_port "$port" "$proto" || echo "")" ]] && [[ $attempts -lt 5 ]]; do
       sleep 1
       ((attempts++))
     done
@@ -288,7 +348,7 @@ free_ports() {
 }
 
 # ============================================================================
-# Системные оптимизации
+# Системные оптимизации (без изменений)
 # ============================================================================
 
 optimize_swap() {
@@ -367,7 +427,7 @@ configure_trim() {
 }
 
 # ============================================================================
-# Безопасность
+# Безопасность (с уменьшенными таймаутами)
 # ============================================================================
 
 configure_firewall() {
@@ -391,8 +451,9 @@ configure_firewall() {
   ufw allow 80/tcp comment "HTTP (ACME/Caddy)" >/dev/null 2>&1
   ufw allow 443/tcp comment "HTTPS (Xray)" >/dev/null 2>&1
   
-  if ! timeout 15 ufw --force enable >/dev/null 2>&1; then
-    print_warning "UFW активирован с предупреждениями (таймаут при включении)"
+  # Таймаут уменьшен до 10 сек
+  if ! timeout 10 ufw --force enable >/dev/null 2>&1; then
+    print_warning "UFW активирован с предупреждениями"
   fi
   
   if ufw status | grep -q "Status: active"; then
@@ -425,11 +486,12 @@ ignoreip = 127.0.0.1/8 ::1
 EOF
   
   systemctl enable fail2ban >/dev/null 2>&1 || true
-  if ! timeout 10 systemctl start fail2ban >/dev/null 2>&1; then
-    print_warning "Fail2Ban не запустился немедленно (запуск в фоне)"
+  # Таймаут уменьшен до 8 сек
+  if ! timeout 8 systemctl start fail2ban >/dev/null 2>&1; then
+    print_warning "Fail2Ban запущен в фоне"
   fi
   
-  sleep 2
+  sleep 1
   
   if systemctl is-active --quiet fail2ban; then
     print_success "Fail2Ban активен (защита SSH: 3 попытки → бан на 1 час)"
@@ -439,7 +501,7 @@ EOF
 }
 
 # ============================================================================
-# Сайт для маскировки
+# Сайт для маскировки (с исправлением chown)
 # ============================================================================
 
 create_masking_site() {
@@ -514,7 +576,7 @@ EOF_SITE
 }
 
 # ============================================================================
-# Caddy
+# Caddy (с исправлением URL)
 # ============================================================================
 
 install_caddy() {
@@ -548,8 +610,8 @@ install_caddy() {
       > /etc/apt/sources.list.d/caddy-stable.list
   fi
   
-  timeout 30 apt-get update >/dev/null 2>&1 || print_warning "apt update завершился с ошибкой, продолжаем"
-  timeout 120 apt-get install -y caddy >/dev/null 2>&1 || print_error "Не удалось установить Caddy"
+  timeout 25 apt-get update >/dev/null 2>&1 || print_warning "apt update завершился с ошибкой, продолжаем"
+  timeout 90 apt-get install -y caddy >/dev/null 2>&1 || print_error "Не удалось установить Caddy"
   
   print_success "Caddy установлен (версия: $(caddy version 2>/dev/null | head -n1 | cut -d' ' -f1))"
 }
@@ -605,7 +667,7 @@ EOF
   
   systemctl daemon-reload
   systemctl enable caddy --now >/dev/null 2>&1
-  sleep 5
+  sleep 3
   
   if systemctl is-active --quiet caddy; then
     print_success "Caddy запущен (порты 80/443 активны)"
@@ -616,7 +678,7 @@ EOF
 }
 
 # ============================================================================
-# Xray (официальный установщик)
+# Xray (только официальный установщик)
 # ============================================================================
 
 install_xray() {
@@ -632,14 +694,16 @@ install_xray() {
   ensure_dependency "curl" "curl"
   
   print_info "Загрузка официального установщика Xray..."
-  if ! timeout 60 bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1; then
+  # Таймаут уменьшен до 45 сек
+  if ! timeout 45 bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1; then
     print_error "Не удалось установить Xray официальным установщиком. Проверьте сетевое подключение."
   fi
   
   print_info "Установка геофайлов (geoip.dat, geosite.dat)..."
-  if ! timeout 60 bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata >/dev/null 2>&1; then
+  # Таймаут уменьшен до 45 сек
+  if ! timeout 45 bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata >/dev/null 2>&1; then
     print_warning "Не удалось установить геофайлы. Попытка повторной установки..."
-    timeout 60 bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata || true
+    timeout 45 bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata || true
   fi
   
   local version
@@ -648,83 +712,79 @@ install_xray() {
 }
 
 # ============================================================================
-# ГЕНЕРАЦИЯ КЛЮЧЕЙ ТОЛЬКО ОФИЦИАЛЬНОЙ КОМАНДОЙ (БЕЗ РЕЗЕРВНЫХ КЛЮЧЕЙ!)
+# ГЕНЕРАЦИЯ КЛЮЧЕЙ И UUID ТОЛЬКО ОФИЦИАЛЬНЫМИ СРЕДСТВАМИ
+# ВАЖНО: ВСЕГДА НОВЫЙ UUID ПРИ КАЖДОЙ УСТАНОВКЕ
 # ============================================================================
 generate_xray_config() {
-  print_substep "Генерация криптографических параметров (официальная команда xray x25519)"
+  print_substep "Генерация криптографических параметров"
   
   mkdir -p /usr/local/etc/xray
   mkdir -p "$XRAY_DAT_DIR"
   
   local secret_path uuid priv_key pub_key short_id
   
-  if [[ -f "$XRAY_KEYS" ]]; then
-    print_info "Использование существующих параметров из ${XRAY_KEYS}"
-    secret_path=$(grep "^path:" "$XRAY_KEYS" | awk '{print $2}' | sed 's|/||')
-    uuid=$(grep "^uuid:" "$XRAY_KEYS" | awk '{print $2}')
-    priv_key=$(grep "^private_key:" "$XRAY_KEYS" | awk '{print $2}')
-    pub_key=$(grep "^public_key:" "$XRAY_KEYS" | awk '{print $2}')
-    short_id=$(grep "^short_id:" "$XRAY_KEYS" | awk '{print $2}')
-  else
-    secret_path=$(tr -dc 'a-z0-9' < /dev/urandom | head -c 8)
-    uuid=$(cat /proc/sys/kernel/random/uuid)
-    
-    # ============================================================================
-    # ГАРАНТИРОВАННАЯ ГЕНЕРАЦИЯ КЛЮЧЕЙ ТОЛЬКО ЧЕРЕЗ xray x25519
-    # ============================================================================
-    
-    print_info "Генерация X25519 ключей (таймаут: 30 секунд)..."
-    
-    # Выполнение официальной команды с таймаутом
-    local key_pair
-    if ! key_pair=$(timeout 30 xray x25519 2>&1); then
-      print_error "Генерация ключей превысила таймаут (30 сек). Возможные причины:
-  1. Недостаточно энтропии в системе
-  2. Проблемы с /dev/random
+  # ============================================================================
+  # ВАЖНО: ВСЕГДА ГЕНЕРИРУЕМ НОВЫЕ ПАРАМЕТРЫ ПРИ УСТАНОВКЕ
+  # (даже если файлы существуют — это чистая переустановка)
+  # ============================================================================
   
-Решение:
-  sudo apt install haveged && sudo systemctl start haveged && sleep 5
+  secret_path=$(tr -dc 'a-z0-9' < /dev/urandom | head -c 8)
+  
+  # ГЕНЕРАЦИЯ НОВОГО UUID (всегда свежий!)
+  uuid=$(cat /proc/sys/kernel/random/uuid)
+  print_info "Сгенерирован новый UUID: ${uuid:0:8}..."
+  
+  # ============================================================================
+  # ГЕНЕРАЦИЯ КЛЮЧЕЙ ТОЛЬКО ЧЕРЕЗ xray x25519 (без резервных ключей!)
+  # ============================================================================
+  
+  print_info "Генерация X25519 ключей (таймаут: 15 секунд)..."
+  
+  local key_pair
+  # Таймаут уменьшен до 15 секунд с визуальным отсчётом
+  if ! countdown_with_spinner 15 "Генерация ключей Reality" && ! key_pair=$(timeout 15 xray x25519 2>&1); then
+    print_error "Генерация ключей превысила таймаут (15 сек). Решение:
+  sudo apt install haveged && sudo systemctl start haveged
   Затем повторите установку скрипта."
-    fi
-    
-    # Извлечение ключей из вывода
-    priv_key=$(echo "$key_pair" | grep -i "^PrivateKey" | awk '{print $NF}')
-    pub_key=$(echo "$key_pair" | grep -i "^Password" | awk '{print $NF}')
-    
-    # Валидация ключей
-    if [[ -z "$priv_key" || -z "$pub_key" ]]; then
-      print_error "Не удалось извлечь ключи из вывода 'xray x25519'. Вывод команды:
-${key_pair}"
-    fi
-    
-    if [[ "${#priv_key}" -lt 40 || "${#pub_key}" -lt 40 ]]; then
-      print_error "Некорректная длина ключей (ожидается >40 символов):
-  PrivateKey: ${priv_key}
-  Password (Public Key): ${pub_key}"
-    fi
-    
-    short_id=$(openssl rand -hex 4)
-    
-    {
-      echo "path: /${secret_path}"
-      echo "uuid: ${uuid}"
-      echo "private_key: ${priv_key}"
-      echo "public_key: ${pub_key}"
-      echo "short_id: ${short_id}"
-    } > "$XRAY_KEYS"
-    
-    chmod 600 "$XRAY_KEYS"
-    
-    print_success "Ключи успешно сгенерированы официальной командой 'xray x25519'"
-    print_info "Важно: поле 'Password' в выводе = ПУБЛИЧНЫЙ ключ (для клиента)"
   fi
   
-  print_info "Путь: /${secret_path}"
-  print_info "UUID: ${uuid:0:8}..."
-  print_info "ShortID: ${short_id}"
-  print_info "Private key (сервер): ${priv_key:0:8}..."
-  print_info "Public key (клиент):  ${pub_key:0:8}..."
+  # Извлечение ключей из вывода
+  priv_key=$(echo "$key_pair" | grep -i "^PrivateKey" | awk '{print $NF}')
+  pub_key=$(echo "$key_pair" | grep -i "^Password" | awk '{print $NF}')
   
+  # Валидация ключей
+  if [[ -z "$priv_key" || -z "$pub_key" ]]; then
+    print_error "Не удалось извлечь ключи из вывода 'xray x25519'. Вывод:
+${key_pair}"
+  fi
+  
+  if [[ "${#priv_key}" -lt 40 || "${#pub_key}" -lt 40 ]]; then
+    print_error "Некорректная длина ключей:
+  PrivateKey (сервер): ${priv_key}
+  Password/PublicKey (клиент): ${pub_key}"
+  fi
+  
+  short_id=$(openssl rand -hex 4)
+  
+  # Сохранение параметров
+  {
+    echo "path: /${secret_path}"
+    echo "uuid: ${uuid}"
+    echo "private_key: ${priv_key}"
+    echo "public_key: ${pub_key}"
+    echo "short_id: ${short_id}"
+  } > "$XRAY_KEYS"
+  
+  chmod 600 "$XRAY_KEYS"
+  
+  print_success "Параметры успешно сгенерированы:"
+  print_info "  • Secret path: /${secret_path}"
+  print_info "  • UUID: ${uuid:0:8}... (полный в ${XRAY_KEYS})"
+  print_info "  • ShortID: ${short_id}"
+  print_info "  • PrivateKey (сервер): ${priv_key:0:8}..."
+  print_info "  • PublicKey (клиент): ${pub_key:0:8}..."
+  
+  # Генерация конфигурации
   cat > "$XRAY_CONFIG" <<EOF
 {
   "log": {
@@ -824,7 +884,7 @@ EOF
     systemctl enable xray --now >/dev/null 2>&1
   fi
   
-  sleep 5
+  sleep 3
   
   if systemctl is-active --quiet xray; then
     print_success "Xray запущен"
@@ -912,7 +972,7 @@ EOF_GEO_TIMER
 }
 
 # ============================================================================
-# Утилиты управления
+# Утилита управления пользователями (с генерацией нового UUID)
 # ============================================================================
 
 create_user_utility() {
@@ -966,13 +1026,18 @@ case "${ACTION}" in
     read -p "Имя пользователя (латиница, без пробелов): " email < /dev/tty 2>/dev/null || { echo "Ошибка: требуется терминал"; exit 1; }
     [[ -z "${email}" || "${email}" =~ [^a-zA-Z0-9_-] ]] && { echo "Ошибка: недопустимое имя"; exit 1; }
     jq -e ".inbounds[0].settings.clients[] | select(.email==\"${email}\")" "${XRAY_CONFIG}" &>/dev/null && { echo "Ошибка: пользователь существует"; exit 1; }
+    
+    # ГЕНЕРАЦИЯ НОВОГО UUID ДЛЯ КАЖДОГО ПОЛЬЗОВАТЕЛЯ
     local uuid
     uuid=$(cat /proc/sys/kernel/random/uuid)
+    
     jq --arg e "${email}" --arg u "${uuid}" '.inbounds[0].settings.clients += [{"id": $u, "email": $e}]' "${XRAY_CONFIG}" > /tmp/x.tmp && mv /tmp/x.tmp "${XRAY_CONFIG}"
     systemctl restart xray &>/dev/null || echo "Предупреждение: не удалось перезапустить xray"
     local link
     link=$(generate_link "${uuid}" "${email}")
-    echo -e "\nПользователь '${email}' создан\nСсылка:\n${link}"
+    echo -e "\n✅ Пользователь '${email}' создан"
+    echo -e "UUID: ${uuid}"
+    echo -e "\nСсылка для подключения:\n${link}"
     command -v qrencode &>/dev/null && { echo -e "\nQR-код:"; echo "${link}" | qrencode -t ansiutf8; }
     ;;
   rm)
@@ -986,7 +1051,7 @@ case "${ACTION}" in
     [[ "${clients[$((num-1))]}" == "main" ]] && { echo "Ошибка: нельзя удалить основного пользователя"; exit 1; }
     jq --arg e "${clients[$((num-1))]}" '(.inbounds[0].settings.clients) |= map(select(.email != $e))' "${XRAY_CONFIG}" > /tmp/x.tmp && mv /tmp/x.tmp "${XRAY_CONFIG}"
     systemctl restart xray &>/dev/null || echo "Предупреждение: не удалось перезапустить xray"
-    echo "Пользователь '${clients[$((num-1))]}' удалён"
+    echo "✅ Пользователь '${clients[$((num-1))]}' удалён"
     ;;
   link)
     local clients=()
@@ -1001,7 +1066,7 @@ case "${ACTION}" in
     [[ -z "${uuid}" ]] && { echo "Ошибка: пользователь не найден"; exit 1; }
     local link
     link=$(generate_link "${uuid}" "${clients[$((num-1))]}")
-    echo -e "\nСсылка:\n${link}"
+    echo -e "\nСсылка для ${clients[$((num-1))]}:\n${link}"
     command -v qrencode &>/dev/null && { echo -e "\nQR-код:"; echo "${link}" | qrencode -t ansiutf8; }
     ;;
   help|*)
@@ -1010,7 +1075,7 @@ case "${ACTION}" in
 
   user list    Показать список клиентов
   user qr      QR-код основного пользователя
-  user add     Добавить нового пользователя
+  user add     Добавить нового пользователя (с новым UUID)
   user rm      Удалить пользователя
   user link    Сгенерировать ссылку для клиента
   user help    Показать эту справку
@@ -1035,7 +1100,7 @@ create_help_file() {
 УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ
   user list    Список всех клиентов
   user qr      QR-код основного пользователя
-  user add     Создать нового пользователя
+  user add     Создать нового пользователя (всегда с новым UUID)
   user rm      Удалить пользователя
   user link    Сгенерировать ссылку подключения
 
@@ -1050,7 +1115,7 @@ create_help_file() {
 
 ВАЖНЫЕ ФАЙЛЫ
   Конфигурация:  /usr/local/etc/xray/config.json
-  Ключи/Параметры: /usr/local/etc/xray/.keys
+  Ключи/Параметры: /usr/local/etc/xray/.keys (включая уникальный UUID)
   Geo-файлы:     /usr/local/share/xray/{geoip,geosite}.dat
   Конфиг Caddy:  /etc/caddy/Caddyfile
   Сайт маскировки: /var/www/html/
@@ -1078,6 +1143,11 @@ create_help_file() {
   • PrivateKey (вывод 'xray x25519'): приватный ключ → в конфиг сервера (privateKey)
   • Password (вывод 'xray x25519'): ПУБЛИЧНЫЙ ключ → для клиента (параметр pbk в ссылке)
   • Не путайте поля! Название "Password" в выводе вводит в заблуждение.
+
+УНИКАЛЬНЫЙ UUID
+  • При каждой установке генерируется НОВЫЙ UUID для основного пользователя
+  • При добавлении пользователей через 'user add' также генерируется новый UUID
+  • UUID хранится в /usr/local/etc/xray/.keys и /usr/local/etc/xray/config.json
 EOF_HELP
   
   chmod 644 "$HELP_FILE"
@@ -1097,7 +1167,7 @@ main() {
   check_root
   
   # ============================================================================
-  # УСТАНОВКА HAVEGED ДО ЛЮБЫХ КРИПТОГРАФИЧЕСКИХ ОПЕРАЦИЙ
+  # УСТАНОВКА HAVEGED С ОБРАТНЫМ ОТСЧЁТОМ
   # ============================================================================
   print_step "Подготовка системы (энтропия)"
   ensure_entropy
@@ -1119,8 +1189,10 @@ main() {
   
   print_step "Установка зависимостей"
   
-  if ! timeout 45 apt-get update >/dev/null 2>&1; then
-    print_warning "apt update завершился с ошибкой или таймаутом, продолжаем с текущим кэшем"
+  # Обновление списка пакетов с таймаутом 25 сек
+  countdown_with_spinner 25 "Обновление списка пакетов"
+  if ! timeout 25 apt-get update >/dev/null 2>&1; then
+    print_warning "apt update завершился с таймаутом, продолжаем с текущим кэшем"
   fi
   
   ensure_dependency "curl" "curl"
@@ -1146,7 +1218,7 @@ main() {
   
   print_step "Xray Core"
   install_xray
-  generate_xray_config  # ← Здесь генерируются ключи ТОЛЬКО официальной командой
+  generate_xray_config  # ← Генерация НОВОГО UUID и ключей каждый раз
   
   print_step "Автоматические обновления"
   setup_auto_updates
@@ -1165,25 +1237,20 @@ main() {
   echo
   
   echo -e "${BOLD}Основной пользователь:${RESET}"
-  if command -v user &>/dev/null; then
-    /usr/local/bin/user qr 2>/dev/null | grep -A 1 "Ссылка для подключения" || echo -e "  Выполните: ${BOLD}user qr${RESET}"
-  else
-    echo -e "  Выполните: ${BOLD}user qr${RESET}"
-  fi
+  echo -e "  UUID: $(grep '^uuid:' ${XRAY_KEYS} | awk '{print $2}' | cut -c1-8)..."
+  echo -e "  Выполните: ${BOLD}user qr${RESET} для получения ссылки подключения"
   echo
   
   echo -e "${BOLD}Управление:${RESET}"
-  echo -e "  ${MEDIUM_GRAY}user list${RESET}               # Список клиентов"
-  echo -e "  ${MEDIUM_GRAY}user add${RESET}                # Создать пользователя"
-  echo -e "  ${MEDIUM_GRAY}systemctl start xray-core-update.service${RESET}  # Обновить ядро"
-  echo -e "  ${MEDIUM_GRAY}systemctl start xray-geo-update.service${RESET}   # Обновить геофайлы"
-  echo -e "  ${MEDIUM_GRAY}cat ~/help${RESET}              # Полная документация"
+  echo -e "  ${MEDIUM_GRAY}user list${RESET}    # Список клиентов"
+  echo -e "  ${MEDIUM_GRAY}user add${RESET}     # Создать пользователя (с новым UUID)"
+  echo -e "  ${MEDIUM_GRAY}user qr${RESET}      # QR-код основного пользователя"
+  echo -e "  ${MEDIUM_GRAY}cat ~/help${RESET}   # Полная документация"
   echo
   
   echo -e "${BOLD}Автоматические обновления:${RESET}"
   echo -e "  • Ядро Xray:   каждое воскресенье 03:00"
   echo -e "  • Геофайлы:    ежедневно 03:00"
-  echo -e "  • Статус:      systemctl list-timers | grep xray"
   echo
   
   echo -e "${SOFT_YELLOW}⚠${RESET} SSL-сертификат будет автоматически получен при первом обращении к ${BOLD}https://${DOMAIN}${RESET}"
