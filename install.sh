@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 # ============================================================================
-# Xray VLESS/XHTTP/Reality Installer (v2.8 — исправлены права логов Caddy)
+# Xray VLESS/XHTTP/Reality Installer (Исправленная версия)
 # ============================================================================
 DARK_GRAY='\033[38;5;242m'
 SOFT_BLUE='\033[38;5;67m'
@@ -403,7 +403,7 @@ card.style.transform = 'translateY(0)';
 EOF_SITE
   echo -e "User-agent: *\nDisallow: /admin/" > "$SITE_DIR/robots.txt"
   printf '\x00' > "$SITE_DIR/favicon.ico" 2>/dev/null || true
-  # ИСПРАВЛЕНО: опечатка www-www-data → www-data
+  # ИСПРАВЛЕНО: www-www-data → www-data
   chown -R www-data "$SITE_DIR" 2>/dev/null || true
   chmod -R 755 "$SITE_DIR"
   print_success "Сайт создан"
@@ -821,7 +821,7 @@ EOF_HELP
 main() {
   echo -e "
 ${BOLD}${SOFT_BLUE}Xray VLESS/XHTTP/Reality Installer${RESET}"
-  echo -e "${LIGHT_GRAY}Исправлено: права логов Caddy • Путь в xhttpSettings • Опечатка www-data${RESET}"
+  echo -e "${LIGHT_GRAY}Официальная генерация UUID • Правильная валидация • Минималистичный${RESET}"
   echo -e "${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}
 "
   check_root
@@ -851,7 +851,7 @@ ${BOLD}${SOFT_BLUE}Xray VLESS/XHTTP/Reality Installer${RESET}"
   create_masking_site
   print_step "Caddy"
   install_caddy
-  configure_caddy  # <-- ИСПРАВЛЕНА НАСТРОЙКА С ПРАВАМИ ЛОГОВ
+  configure_caddy
   print_step "Xray"
   install_xray
   generate_xray_config
@@ -867,7 +867,6 @@ ${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━�
   echo -e "${BOLD}Домен:${RESET}  https://${DOMAIN}"
   echo -e "${BOLD}IP:${RESET}     ${SERVER_IP}"
   echo -e "${BOLD}UUID:${RESET}   $(grep '^uuid:' ${XRAY_KEYS} 2>/dev/null | awk '{print $2}' | cut -c1-8)..."
-  echo -e "${BOLD}Путь:${RESET}   $(grep '^path:' ${XRAY_KEYS} 2>/dev/null | awk '{print $2}')"
   echo
   echo -e "Подключение: ${BOLD}user qr${RESET}"
   echo -e "Документация: ${BOLD}cat ~/help${RESET}"
