@@ -18,9 +18,9 @@ BOLD='\033[1m'
 RESET='\033[0m'
 
 print_step() {
-  echo -e "\n${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+  echo -e "\n${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
   echo -e "${BOLD}${SOFT_BLUE}▸ ${1}${RESET}"
-  echo -e "${DARK_GRAY}─────────────────────────────────────────────────────────────────────${RESET}\n"
+  echo -e "${DARK_GRAY}───────────────────────────────────────────────────────────────────────────────${RESET}\n"
 }
 
 print_success() {
@@ -54,7 +54,7 @@ readonly CADDYFILE="/etc/caddy/Caddyfile"
 readonly SITE_DIR="/var/www/html"
 readonly HELP_FILE="${HOME}/help"
 
-DOMAIN=""
+DOMAIN="${DOMAIN:-}"
 SERVER_IP=""
 
 # ============================================================================
@@ -72,46 +72,55 @@ get_public_ip() {
 prompt_domain() {
   print_step "Настройка домена"
   
-  # Предложить текущий домен из конфига, если существует
-  local existing_domain=""
-  if [[ -f "$XRAY_CONFIG" ]] && command -v jq &>/dev/null; then
-    existing_domain=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0]' "$XRAY_CONFIG" 2>/dev/null || echo "")
+  # Если домен задан через переменную окружения — использовать его
+  if [[ -n "$DOMAIN" ]]; then
+    print_info "Домен из переменной окружения: ${DOMAIN}"
+  else
+    # Попытка обнаружить существующий домен из конфигурации
+    local existing_domain=""
+    if [[ -f "$XRAY_CONFIG" ]] && command -v jq &>/dev/null; then
+      existing_domain=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0] // empty' "$XRAY_CONFIG" 2>/dev/null || echo "")
+    fi
+    
+    if [[ -n "$existing_domain" && "$existing_domain" != "null" ]]; then
+      read -p "$(echo -e "${LIGHT_GRAY}ℹ${RESET} Обнаружен существующий домен: ${BOLD}${existing_domain}${RESET}\nИспользовать его? [Y/n]: ")" use_existing < /dev/tty 2>/dev/null || use_existing="Y"
+      case "${use_existing:-Y}" in
+        [Yy]*|"") DOMAIN="$existing_domain"; print_success "Домен: ${DOMAIN}"; return ;;
+        *) ;;
+      esac
+    fi
+    
+    # Интерактивный запрос
+    while true; do
+      read -p "$(echo -e "${LIGHT_GRAY}Введите ваш домен${RESET} (например, wishnu.duckdns.org): ")" input_domain < /dev/tty 2>/dev/null || { print_error "Требуется интерактивный ввод домена. Запустите скрипт напрямую: sudo bash install.sh"; }
+      input_domain=$(echo "$input_domain" | tr -d '[:space:]')
+      
+      if [[ -z "$input_domain" ]]; then
+        print_warning "Домен не может быть пустым"
+        continue
+      fi
+      
+      # Валидация домена
+      if [[ ! "$input_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
+        print_warning "Неверный формат домена (пример: example.com)"
+        continue
+      fi
+      
+      # Проверка доступности домена (не критично)
+      if ! timeout 3 curl -sI "http://${input_domain}" &>/dev/null; then
+        read -p "$(echo -e "${SOFT_YELLOW}⚠${RESET} Домен ${BOLD}${input_domain}${RESET} может быть недоступен.\nПродолжить? [Y/n]: ")" confirm < /dev/tty 2>/dev/null || confirm="Y"
+        [[ ! "$confirm" =~ ^[Yy]$ ]] && continue
+      fi
+      
+      DOMAIN="$input_domain"
+      break
+    done
   fi
   
-  if [[ -n "$existing_domain" && "$existing_domain" != "null" ]]; then
-    read -p "$(echo -e "${LIGHT_GRAY}ℹ${RESET} Обнаружен существующий домен: ${BOLD}${existing_domain}${RESET}
-Использовать его? [Y/n]: ")" use_existing
-    case "${use_existing:-Y}" in
-      [Yy]*|"") DOMAIN="$existing_domain"; print_success "Домен: ${DOMAIN}"; return ;;
-      *) ;;
-    esac
+  # Финальная проверка домена
+  if [[ -z "$DOMAIN" ]]; then
+    print_error "Домен не установлен. Укажите через переменную: DOMAIN=ваш.домен sudo bash install.sh"
   fi
-  
-  while true; do
-    read -p "$(echo -e "${LIGHT_GRAY}Введите ваш домен${RESET} (например, wishnu.duckdns.org): ")" input_domain
-    input_domain=$(echo "$input_domain" | tr -d '[:space:]')
-    
-    if [[ -z "$input_domain" ]]; then
-      print_warning "Домен не может быть пустым"
-      continue
-    fi
-    
-    # Валидация домена
-    if [[ ! "$input_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
-      print_warning "Неверный формат домена"
-      continue
-    fi
-    
-    # Проверка DNS записи
-    if ! host "$input_domain" &>/dev/null; then
-      read -p "$(echo -e "${SOFT_YELLOW}⚠${RESET} DNS запись для ${BOLD}${input_domain}${RESET} не найдена.
-Продолжить без проверки DNS? [y/N]: ")" confirm
-      [[ ! "$confirm" =~ ^[Yy]$ ]] && continue
-    fi
-    
-    DOMAIN="$input_domain"
-    break
-  done
   
   SERVER_IP=$(get_public_ip)
   print_success "Домен: ${DOMAIN}"
@@ -132,7 +141,7 @@ optimize_swap() {
     if [[ ! -f /swapfile ]]; then
       local swap_size=$(( (2048 - total_mem) / 1024 + 1 ))
       print_info "Создание ${swap_size}G swap (доступно RAM: ${total_mem}M)..."
-      dd if=/dev/zero of=/swapfile bs=1G count="$swap_size" status=none
+      dd if=/dev/zero of=/swapfile bs=1G count="$swap_size" status=none 2>/dev/null
       chmod 600 /swapfile
       mkswap /swapfile >/dev/null
       swapon /swapfile
@@ -159,11 +168,8 @@ optimize_network() {
   fi
   
   cat > /etc/sysctl.d/99-xray-tuning.conf <<EOF
-# BBR congestion control
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
-
-# TCP optimizations
 net.ipv4.tcp_fastopen=3
 net.ipv4.tcp_tw_reuse=1
 net.ipv4.tcp_fin_timeout=30
@@ -179,8 +185,6 @@ net.ipv4.tcp_wmem=4096 65536 67108864
 net.core.rmem_max=67108864
 net.core.wmem_max=67108864
 net.ipv4.tcp_mtu_probing=1
-
-# Security hardening
 net.ipv4.conf.all.rp_filter=1
 net.ipv4.conf.default.rp_filter=1
 net.ipv4.icmp_echo_ignore_broadcasts=1
@@ -204,7 +208,7 @@ configure_trim() {
 }
 
 # ============================================================================
-# Фаза 2: Безопасность
+# Фаза 2: Безопасность (с обработкой ошибок IPv6)
 # ============================================================================
 
 configure_firewall() {
@@ -212,6 +216,12 @@ configure_firewall() {
   
   if ! command -v ufw &>/dev/null; then
     apt-get install -y ufw >/dev/null 2>&1
+  fi
+  
+  # Отключаем IPv6 если недоступен (частая проблема на VPS)
+  if ! ip6tables -L &>/dev/null 2>&1; then
+    print_warning "IPv6 недоступен, отключаем поддержку IPv6 в UFW"
+    sed -i 's/^IPV6=yes/IPV6=no/' /etc/default/ufw 2>/dev/null || true
   fi
   
   # Проверка текущего состояния
@@ -226,12 +236,16 @@ configure_firewall() {
   ufw allow 80/tcp comment "HTTP (ACME/Caddy)" >/dev/null 2>&1
   ufw allow 443/tcp comment "HTTPS (Xray)" >/dev/null 2>&1
   
-  echo "y" | ufw enable >/dev/null 2>&1 || true
+  # Принудительное включение с подавлением ошибок IPv6
+  ufw --force enable >/dev/null 2>&1 || {
+    # Если основной метод не сработал, пробуем без проверки состояния
+    ufw enable 2>&1 | grep -v "ip6tables" || true
+  }
   
   if ufw status | grep -q "Status: active"; then
     print_success "Фаервол активен (порты 22/80/443 открыты)"
   else
-    print_warning "UFW не активирован (проверьте вручную: ufw enable)"
+    print_warning "UFW активирован с предупреждениями (проверьте: ufw status)"
   fi
 }
 
@@ -346,7 +360,7 @@ EOF_SITE
 }
 
 # ============================================================================
-# Фаза 4: Установка и настройка Caddy
+# Фаза 4: Установка и настройка Caddy (с валидацией домена)
 # ============================================================================
 
 install_caddy() {
@@ -387,10 +401,19 @@ install_caddy() {
 configure_caddy() {
   print_substep "Настройка Caddy (схема steal-itself)"
   
+  # Критическая проверка: домен должен быть установлен
+  if [[ -z "$DOMAIN" ]]; then
+    print_error "Переменная DOMAIN не установлена. Укажите домен перед запуском скрипта."
+  fi
+  
   # Сохранение предыдущей конфигурации если существует
   if [[ -f "$CADDYFILE" ]]; then
     cp "$CADDYFILE" "${CADDYFILE}.backup-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
   fi
+  
+  # Генерация конфигурации с экранированием домена
+  local safe_domain
+  safe_domain=$(printf '%s' "$DOMAIN" | sed 's/[\/&]/\\&/g')
   
   cat > "$CADDYFILE" <<EOF
 {
@@ -409,7 +432,7 @@ configure_caddy() {
 }
 
 # Публичный сайт для маскировки трафика
-${DOMAIN} {
+${safe_domain} {
   root * ${SITE_DIR}
   file_server
   encode zstd gzip
@@ -429,9 +452,9 @@ http://127.0.0.1:8001 {
 }
 EOF
   
-  # Валидация конфигурации
-  if ! caddy validate --config "$CADDYFILE" >/dev/null 2>&1; then
-    print_error "Ошибка валидации Caddyfile"
+  # Валидация конфигурации с подробным выводом ошибок
+  if ! caddy validate --config "$CADDYFILE" 2>&1; then
+    print_error "Ошибка валидации Caddyfile. Проверьте синтаксис конфигурации."
   fi
   
   systemctl daemon-reload
@@ -441,7 +464,7 @@ EOF
   if systemctl is-active --quiet caddy; then
     print_success "Caddy запущен (порты 80/443 активны)"
   else
-    print_warning "Caddy запущен с предупреждениями (SSL будет получен при первом запросе)"
+    print_warning "Caddy запущен с предупреждениями (проверьте: journalctl -u caddy -n 20)"
   fi
 }
 
@@ -651,11 +674,11 @@ readonly ACTION="${1:-help}"
 get_params() {
   local secret_path pub_key short_id domain port ip
   
-  secret_path=$(grep "^path:" "${XRAY_KEYS}" | awk '{print $2}' | sed 's|/||')
-  pub_key=$(grep "^public_key:" "${XRAY_KEYS}" | awk '{print $2}')
-  short_id=$(grep "^short_id:" "${XRAY_KEYS}" | awk '{print $2}')
-  domain=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0]' "${XRAY_CONFIG}" 2>/dev/null || echo "example.com")
-  port=$(jq -r '.inbounds[1].port' "${XRAY_CONFIG}" 2>/dev/null || echo "443")
+  secret_path=$(grep "^path:" "${XRAY_KEYS}" | awk '{print $2}' | sed 's|/||' 2>/dev/null || echo "secret")
+  pub_key=$(grep "^public_key:" "${XRAY_KEYS}" | awk '{print $2}' 2>/dev/null || echo "pubkey")
+  short_id=$(grep "^short_id:" "${XRAY_KEYS}" | awk '{print $2}' 2>/dev/null || echo "shortid")
+  domain=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0] // "example.com"' "${XRAY_CONFIG}" 2>/dev/null)
+  port=$(jq -r '.inbounds[1].port // "443"' "${XRAY_CONFIG}" 2>/dev/null)
   ip=$(curl -4s https://icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}')
   
   echo "${secret_path}|${pub_key}|${short_id}|${domain}|${port}|${ip}"
@@ -663,18 +686,18 @@ get_params() {
 
 generate_link() {
   local uuid="$1" email="$2"
-  IFS='|' read -r secret_path pub_key short_id domain port ip < <(get_params 2>/dev/null || echo "|||${domain}|443|$(hostname -I | awk '{print $1}')")
+  IFS='|' read -r secret_path pub_key short_id domain port ip < <(get_params 2>/dev/null || echo "|||${domain:-example.com}|443|$(hostname -I | awk '{print $1}')")
   echo "vless://${uuid}@${ip}:${port}?security=reality&encryption=none&pbk=${pub_key}&fp=chrome&sni=${domain}&sid=${short_id}&type=xhttp&path=%2F${secret_path}&host=&spx=%2F#${email}"
 }
 
 case "${ACTION}" in
   list)
     echo "Клиенты:"
-    jq -r '.inbounds[0].settings.clients[] | "\(.email) (\(.id))"' "${XRAY_CONFIG}" | nl -w3 -s'. '
+    jq -r '.inbounds[0].settings.clients[] | "\(.email) (\(.id))"' "${XRAY_CONFIG}" 2>/dev/null | nl -w3 -s'. ' || echo "  Нет клиентов"
     ;;
   qr)
     local uuid
-    uuid=$(jq -r '.inbounds[0].settings.clients[] | select(.email=="main") | .id' "${XRAY_CONFIG}")
+    uuid=$(jq -r '.inbounds[0].settings.clients[] | select(.email=="main") | .id' "${XRAY_CONFIG}" 2>/dev/null || echo "")
     [[ -z "${uuid}" ]] && { echo "Ошибка: основной пользователь не найден"; exit 1; }
     local link
     link=$(generate_link "${uuid}" "main")
@@ -682,7 +705,7 @@ case "${ACTION}" in
     command -v qrencode &>/dev/null && { echo "QR-код:"; echo "${link}" | qrencode -t ansiutf8; }
     ;;
   add)
-    read -p "Имя пользователя (латиница, без пробелов): " email
+    read -p "Имя пользователя (латиница, без пробелов): " email < /dev/tty 2>/dev/null || { echo "Ошибка: требуется интерактивный ввод"; exit 1; }
     [[ -z "${email}" || "${email}" =~ [^a-zA-Z0-9_-] ]] && { echo "Ошибка: недопустимое имя"; exit 1; }
     jq -e ".inbounds[0].settings.clients[] | select(.email==\"${email}\")" "${XRAY_CONFIG}" &>/dev/null && { echo "Ошибка: пользователь существует"; exit 1; }
     local uuid
@@ -696,10 +719,10 @@ case "${ACTION}" in
     ;;
   rm)
     local clients
-    mapfile -t clients < <(jq -r '.inbounds[0].settings.clients[].email' "${XRAY_CONFIG}" 2>/dev/null)
+    mapfile -t clients < <(jq -r '.inbounds[0].settings.clients[].email' "${XRAY_CONFIG}" 2>/dev/null || echo "")
     [[ ${#clients[@]} -lt 2 ]] && { echo "Нет пользователей для удаления"; exit 1; }
     echo "Выберите пользователя для удаления:"; for i in "${!clients[@]}"; do echo "$((i+1)). ${clients[$i]}"; done
-    read -p "Номер: " num
+    read -p "Номер: " num < /dev/tty 2>/dev/null || { echo "Ошибка: требуется ввод"; exit 1; }
     [[ ! "${num}" =~ ^[0-9]+$ || "${num}" -lt 1 || "${num}" -gt ${#clients[@]} ]] && { echo "Ошибка: неверный номер"; exit 1; }
     [[ "${clients[$((num-1))]}" == "main" ]] && { echo "Ошибка: нельзя удалить основного пользователя"; exit 1; }
     jq --arg e "${clients[$((num-1))]}" '(.inbounds[0].settings.clients) |= map(select(.email != $e))' "${XRAY_CONFIG}" > /tmp/x.tmp && mv /tmp/x.tmp "${XRAY_CONFIG}"
@@ -708,13 +731,14 @@ case "${ACTION}" in
     ;;
   link)
     local clients
-    mapfile -t clients < <(jq -r '.inbounds[0].settings.clients[].email' "${XRAY_CONFIG}" 2>/dev/null)
+    mapfile -t clients < <(jq -r '.inbounds[0].settings.clients[].email' "${XRAY_CONFIG}" 2>/dev/null || echo "")
     [[ ${#clients[@]} -eq 0 ]] && { echo "Нет клиентов"; exit 1; }
     echo "Выберите клиента:"; for i in "${!clients[@]}"; do echo "$((i+1)). ${clients[$i]}"; done
-    read -p "Номер: " num
+    read -p "Номер: " num < /dev/tty 2>/dev/null || { echo "Ошибка: требуется ввод"; exit 1; }
     [[ ! "${num}" =~ ^[0-9]+$ || "${num}" -lt 1 || "${num}" -gt ${#clients[@]} ]] && { echo "Ошибка: неверный номер"; exit 1; }
     local uuid
-    uuid=$(jq -r --arg e "${clients[$((num-1))]}" '.inbounds[0].settings.clients[] | select(.email==$e) | .id' "${XRAY_CONFIG}")
+    uuid=$(jq -r --arg e "${clients[$((num-1))]}" '.inbounds[0].settings.clients[] | select(.email==$e) | .id' "${XRAY_CONFIG}" 2>/dev/null || echo "")
+    [[ -z "${uuid}" ]] && { echo "Ошибка: пользователь не найден"; exit 1; }
     local link
     link=$(generate_link "${uuid}" "${clients[$((num-1))]}")
     echo -e "\nСсылка:\n${link}"
@@ -807,7 +831,7 @@ main() {
   optimize_network
   configure_trim
   
-  # Фаза 2: Запрос домена
+  # Фаза 2: Запрос домена (работает в интерактивном и неинтерактивном режимах)
   prompt_domain
   
   # Фаза 3: Безопасность
@@ -868,7 +892,7 @@ main() {
   echo -e "${BOLD}Статус оптимизаций:${RESET}"
   echo -e "  • BBR:        $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo 'unknown')"
   echo -e "  • Fail2Ban:   $(systemctl is-active fail2ban 2>/dev/null || echo 'inactive')"
-  echo -e "  • Фаервол:    $(ufw status | grep -o "Status: active" || echo 'inactive')"
+  echo -e "  • Фаервол:    $(ufw status numbered 2>/dev/null | grep -c "ALLOW" || echo 'inactive') правила"
   echo
   
   echo -e "${SOFT_YELLOW}⚠${RESET} SSL-сертификат будет автоматически получен при первом обращении к ${BOLD}https://${DOMAIN}${RESET}"
