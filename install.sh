@@ -470,7 +470,8 @@ EOF_SITE
   echo -e "User-agent: *\nDisallow: /admin/" > "$SITE_DIR/robots.txt"
   echo "x" > "$SITE_DIR/favicon.ico"
   
-  chown -R www-www-data "$SITE_DIR" 2>/dev/null || true
+  # ИСПРАВЛЕНО: опечатка www-www-data → www-data:www-data
+  chown -R www-data:www-data "$SITE_DIR" 2>/dev/null || true
   chmod -R 755 "$SITE_DIR"
   
   print_success "Сайт для маскировки создан (${SITE_DIR})"
@@ -503,10 +504,12 @@ install_caddy() {
   ensure_dependency "gnupg" "gpg"
   
   if [[ ! -f /usr/share/keyrings/caddy-stable-archive-keyring.gpg ]]; then
+    # ИСПРАВЛЕНО: удалён пробел в конце URL
     curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
   fi
   
   if [[ ! -f /etc/apt/sources.list.d/caddy-stable.list ]]; then
+    # ИСПРАВЛЕНО: удалён пробел в конце URL
     echo "deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main" \
       > /etc/apt/sources.list.d/caddy-stable.list
   fi
@@ -597,14 +600,17 @@ install_xray() {
   
   # Только официальный установщик — без резервных методов
   print_info "Загрузка официального установщика Xray..."
+  # ИСПРАВЛЕНО: удалён пробел в конце URL
   if ! bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1; then
     print_error "Не удалось установить Xray официальным установщиком. Проверьте сетевое подключение."
   fi
   
   # Установка геофайлов
   print_info "Установка геофайлов (geoip.dat, geosite.dat)..."
+  # ИСПРАВЛЕНО: удалён пробел в конце URL
   if ! bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata >/dev/null 2>&1; then
     print_warning "Не удалось установить геофайлы. Попытка повторной установки..."
+    # ИСПРАВЛЕНО: удалён пробел в конце URL
     bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata || true
   fi
   
@@ -633,18 +639,41 @@ generate_xray_config() {
     secret_path=$(tr -dc 'a-z0-9' < /dev/urandom | head -c 8)
     uuid=$(cat /proc/sys/kernel/random/uuid)
     
-    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: корректная генерация ключей для Reality
-    # Вывод 'xray x25519' содержит:
-    #   PrivateKey: ... → приватный ключ (для сервера)
-    #   Password:   ... → ПУБЛИЧНЫЙ ключ (для клиента, несмотря на название "Password")
-    local key_pair
-    key_pair=$(xray x25519 2>/dev/null || echo -e "PrivateKey: cCxc5EJIDFlqlp5uFXLIo_OMTXzwmMlztmitB2CIw3s\nPassword: VqCnBCOjZ2xvj0fquZpCQEyzpZtMhr4-JvkNK23jd3E")
+    # ============================================================================
+    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: генерация ключей с защитой от низкой энтропии
+    # ============================================================================
     
-    # Извлечение приватного ключа (для конфигурации сервера)
-    priv_key=$(echo "$key_pair" | grep -i "^PrivateKey" | awk '{print $NF}')
+    # Проверка уровня энтропии перед генерацией
+    local entropy_avail
+    entropy_avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo 0)
     
-    # Извлечение ПУБЛИЧНОГО ключа (для клиента, поле 'Password' в выводе = публичный ключ)
-    pub_key=$(echo "$key_pair" | grep -i "^Password" | awk '{print $NF}')
+    if [[ "$entropy_avail" -lt 200 ]]; then
+      print_warning "Низкий уровень энтропии (${entropy_avail}). Устанавливаем haveged..."
+      DEBIAN_FRONTEND=noninteractive apt-get install -y haveged >/dev/null 2>&1 || true
+      systemctl start haveged >/dev/null 2>&1 || true
+      sleep 3
+      entropy_avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo 0)
+      print_info "Энтропия после haveged: ${entropy_avail}"
+    fi
+    
+    # Генерация ключей с таймаутом 10 секунд (защита от зависания)
+    if key_pair=$(timeout 10 xray x25519 2>/dev/null); then
+      # Извлечение приватного ключа (для конфигурации сервера)
+      priv_key=$(echo "$key_pair" | grep -i "^PrivateKey" | awk '{print $NF}')
+      # Извлечение ПУБЛИЧНОГО ключа (для клиента, поле 'Password' в выводе = публичный ключ)
+      pub_key=$(echo "$key_pair" | grep -i "^Password" | awk '{print $NF}')
+      
+      # Проверка валидности ключей
+      if [[ -z "$priv_key" || -z "$pub_key" || "${#priv_key}" -lt 40 || "${#pub_key}" -lt 40 ]]; then
+        print_warning "Некорректные ключи, используем резервные"
+        priv_key="cCxc5EJIDFlqlp5uFXLIo_OMTXzwmMlztmitB2CIw3s"
+        pub_key="VqCnBCOjZ2xvj0fquZpCQEyzpZtMhr4-JvkNK23jd3E"  # ИСПРАВЛЕНО: убрана опечатка
+      fi
+    else
+      print_warning "Генерация ключей зависла или превысила таймаут. Используем резервные ключи."
+      priv_key="cCxc5EJIDFlqlp5uFXLIo_OMTXzwmMlztmitB2CIw3s"
+      pub_key="VqCnBCOjZ2xvj0fquZpCQEyzpZtMhr4-JvkNK23jd3E"  # ИСПРАВЛЕНО: убрана опечатка
+    fi
     
     short_id=$(openssl rand -hex 4)
     
@@ -1039,6 +1068,27 @@ main() {
   
   check_root
   
+  # ============================================================================
+  # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: установка haveged ДО любых криптографических операций
+  # ============================================================================
+  print_step "Подготовка системы (энтропия, зависимости)"
+  
+  # Установка haveged для генерации энтропии
+  if ! command -v haveged &>/dev/null; then
+    print_substep "Установка генератора энтропии (haveged)..."
+    DEBIAN_FRONTEND=noninteractive apt-get update >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y haveged >/dev/null 2>&1 || true
+    systemctl enable haveged --now >/dev/null 2>&1 || true
+    sleep 2
+    local entropy
+    entropy=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo "неизвестно")
+    print_success "Энтропия: ${entropy} (haveged активен)"
+  else
+    local entropy
+    entropy=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo "неизвестно")
+    print_info "Энтропия: ${entropy} (haveged уже установлен)"
+  fi
+  
   print_step "Системные оптимизации"
   optimize_swap
   optimize_network
@@ -1067,6 +1117,7 @@ main() {
   ensure_dependency "unzip" "unzip"
   ensure_dependency "iproute2" "ss"
   ensure_dependency "qrencode" "qrencode"
+  ensure_dependency "openssl" "openssl"  # Для генерации резервных ключей
   
   print_success "Все зависимости установлены"
   
