@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ============================================================================
 # Xray VLESS/XHTTP/Reality Installer
-# Полная системная оптимизация + маскировка трафика (steal-itself scheme)
+# Полная системная оптимизация + маскировка трафика + автоматические обновления
 # ============================================================================
 
 # =============== СОВРЕМЕННАЯ ЦВЕТОВАЯ СХЕМА ===============
@@ -55,6 +55,7 @@ print_substep() {
 
 readonly XRAY_CONFIG="/usr/local/etc/xray/config.json"
 readonly XRAY_KEYS="/usr/local/etc/xray/.keys"
+readonly XRAY_DAT_DIR="/usr/local/share/xray"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
 readonly SITE_DIR="/var/www/html"
 readonly HELP_FILE="${HOME}/help"
@@ -63,8 +64,125 @@ DOMAIN="${DOMAIN:-}"
 SERVER_IP=""
 
 # ============================================================================
-# Функции проверки зависимостей
+# Вспомогательные функции
 # ============================================================================
+
+check_root() {
+  [[ "$EUID" -eq 0 ]] || print_error "Скрипт должен запускаться от имени root (используйте sudo)"
+}
+
+get_public_ip() {
+  curl -4s https://icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}' | cut -d' ' -f1
+}
+
+is_interactive() {
+  [[ -t 0 && -t 1 ]]
+}
+
+prompt_domain() {
+  print_step "Настройка домена"
+  
+  # 1. Переменная окружения
+  if [[ -n "$DOMAIN" ]]; then
+    print_info "Домен из переменной окружения: ${DOMAIN}"
+    validate_and_set_domain "$DOMAIN"
+    return
+  fi
+  
+  # 2. Существующая конфигурация
+  local existing_domain=""
+  if [[ -f "$XRAY_CONFIG" ]] && command -v jq &>/dev/null; then
+    existing_domain=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0] // empty' "$XRAY_CONFIG" 2>/dev/null || echo "")
+  fi
+  
+  if [[ -n "$existing_domain" && "$existing_domain" != "null" ]]; then
+    if is_interactive; then
+      local use_existing
+      read -p "$(echo -e "${LIGHT_GRAY}ℹ${RESET} Обнаружен домен: ${BOLD}${existing_domain}${RESET}\nИспользовать его? [Y/n]: ")" use_existing < /dev/tty 2>/dev/null || use_existing="Y"
+      case "${use_existing:-Y}" in
+        [Yy]*|"") 
+          DOMAIN="$existing_domain"
+          print_success "Домен: ${DOMAIN}"
+          SERVER_IP=$(get_public_ip)
+          print_info "IP-адрес сервера: ${SERVER_IP}"
+          return 
+          ;;
+        *) ;;
+      esac
+    else
+      DOMAIN="$existing_domain"
+      print_info "Используется домен из конфигурации: ${DOMAIN}"
+      SERVER_IP=$(get_public_ip)
+      print_info "IP-адрес сервера: ${SERVER_IP}"
+      return
+    fi
+  fi
+  
+  # 3. Интерактивный запрос
+  if is_interactive; then
+    echo -e "${BOLD}Введите Ваш домен${RESET} (пример: wishnu.duckdns.org)"
+    echo -e "${LIGHT_GRAY}Домен должен быть привязан к IP-адресу этого сервера${RESET}"
+    
+    while true; do
+      local input_domain
+      read -p "> " input_domain < /dev/tty 2>/dev/null || {
+        print_error "Ошибка: требуется терминал. Для автоматической установки укажите домен через переменную окружения:\n  DOMAIN=ваш.домен sudo bash install.sh"
+      }
+      input_domain=$(echo "$input_domain" | tr -d '[:space:]')
+      
+      if [[ -z "$input_domain" ]]; then
+        print_warning "Домен не может быть пустым"
+        continue
+      fi
+      
+      if [[ ! "$input_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
+        print_warning "Неверный формат домена (пример: ваш-домен.duckdns.org)"
+        continue
+      fi
+      
+      validate_and_set_domain "$input_domain"
+      break
+    done
+  else
+    print_error "Домен не указан. Укажите через переменную окружения:\n  DOMAIN=wishnu.duckdns.org sudo bash install.sh\n\nИли запустите интерактивно:\n  sudo bash install.sh"
+  fi
+}
+
+validate_and_set_domain() {
+  local input_domain="$1"
+  
+  if [[ ! "$input_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
+    print_error "Неверный формат домена: ${input_domain}"
+  fi
+  
+  local ipv4
+  ipv4=$(host -t A "$input_domain" 2>/dev/null | awk '/has address/ {print $4; exit}' || echo "")
+  
+  if [[ -n "$ipv4" ]]; then
+    print_success "DNS A-запись найдена: ${ipv4}"
+  else
+    if is_interactive; then
+      read -p "$(echo -e "${SOFT_YELLOW}⚠${RESET} DNS для ${BOLD}${input_domain}${RESET} не найден.\nПродолжить без проверки DNS? [y/N]: ")" confirm < /dev/tty 2>/dev/null || confirm="N"
+      [[ ! "$confirm" =~ ^[Yy]$ ]] && print_error "Установка прервана"
+    else
+      print_warning "DNS не найден (продолжаем без проверки)"
+    fi
+  fi
+  
+  SERVER_IP=$(get_public_ip)
+  if [[ -n "$ipv4" && "$ipv4" != "$SERVER_IP" ]]; then
+    if is_interactive; then
+      read -p "$(echo -e "${SOFT_YELLOW}⚠${RESET} DNS (${ipv4}) ≠ IP сервера (${SERVER_IP}).\nПродолжить? [y/N]: ")" confirm < /dev/tty 2>/dev/null || confirm="N"
+      [[ ! "$confirm" =~ ^[Yy]$ ]] && print_error "Установка прервана"
+    else
+      print_warning "DNS не соответствует IP сервера (продолжаем)"
+    fi
+  fi
+  
+  DOMAIN="$input_domain"
+  print_success "Домен: ${DOMAIN}"
+  print_info "IP-адрес сервера: ${SERVER_IP}"
+}
 
 ensure_dependency() {
   local pkg="$1"
@@ -82,16 +200,16 @@ ensure_dependency() {
     fi
   fi
   
-  print_info "Установка зависимости: ${pkg}..."
+  print_info "Установка: ${pkg}..."
   if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$pkg" >/dev/null 2>&1; then
-    print_error "Не удалось установить ${pkg}. Проверьте подключение к интернету."
+    print_error "Не удалось установить ${pkg}"
   fi
   
   if [[ "$cmd" != "-" ]] && ! command -v "$cmd" &>/dev/null; then
     print_error "После установки ${pkg} команда '${cmd}' недоступна"
   fi
   
-  print_success "Зависимость '${pkg}' установлена"
+  print_success "Установлено: ${pkg}"
 }
 
 get_process_on_port() {
@@ -111,7 +229,7 @@ free_ports() {
   local ports=("80" "443")
   local proto="tcp"
   
-  print_substep "Очистка портов 80/443 от конфликтующих процессов..."
+  print_substep "Очистка портов 80/443..."
   
   for port in "${ports[@]}"; do
     local pid
@@ -134,7 +252,7 @@ free_ports() {
     local stopped=false
     for svc in nginx apache2 httpd caddy; do
       if systemctl is-active --quiet "$svc" 2>/dev/null; then
-        print_info "Остановка сервиса ${svc}..."
+        print_info "Остановка ${svc}..."
         systemctl stop "$svc" >/dev/null 2>&1 || true
         systemctl disable "$svc" >/dev/null 2>&1 || true
         stopped=true
@@ -154,111 +272,11 @@ free_ports() {
     done
     
     if [[ -n "$(get_process_on_port "$port" "$proto" || echo "")" ]]; then
-      print_error "Не удалось освободить порт ${port}/${proto} после 5 попыток. Остановите процесс вручную: sudo kill -9 ${pid}"
+      print_error "Не удалось освободить порт ${port}/${proto}. Остановите процесс вручную: sudo kill -9 ${pid}"
     fi
     
     print_success "Порт ${port}/${proto} освобождён"
   done
-}
-
-validate_dns_record() {
-  local domain="$1"
-  local record_type="$2"
-  
-  if ! host -t "$record_type" "$domain" &>/dev/null; then
-    return 1
-  fi
-  
-  local ip
-  ip=$(host -t "$record_type" "$domain" 2>/dev/null | awk '/has address/ {print $4; exit}' || host -t "$record_type" "$domain" 2>/dev/null | awk '/has IPv6/ {print $5; exit}')
-  echo "$ip"
-}
-
-check_dns_configuration() {
-  print_substep "Проверка DNS-записей для ${DOMAIN}..."
-  
-  local ipv4
-  ipv4=$(validate_dns_record "$DOMAIN" "A" || echo "")
-  
-  if [[ -n "$ipv4" ]]; then
-    print_success "DNS A-запись найдена: ${ipv4}"
-  else
-    print_warning "DNS A-запись не найдена для ${DOMAIN}"
-    read -p "$(echo -e "${SOFT_YELLOW}⚠${RESET} Продолжить без проверки DNS? [y/N]: ")" confirm < /dev/tty 2>/dev/null || confirm="N"
-    [[ ! "$confirm" =~ ^[Yy]$ ]] && print_error "Установка прервана пользователем"
-  fi
-  
-  SERVER_IP=$(get_public_ip)
-  if [[ -n "$ipv4" && "$ipv4" != "$SERVER_IP" ]]; then
-    print_warning "DNS указывает на ${ipv4}, но сервер имеет IP ${SERVER_IP}"
-    read -p "$(echo -e "${SOFT_YELLOW}⚠${RESET} Продолжить с несоответствующим DNS? [y/N]: ")" confirm < /dev/tty 2>/dev/null || confirm="N"
-    [[ ! "$confirm" =~ ^[Yy]$ ]] && print_error "Установка прервана пользователем"
-  fi
-  
-  print_info "IP-адрес сервера: ${SERVER_IP}"
-}
-
-# ============================================================================
-# Вспомогательные функции
-# ============================================================================
-
-check_root() {
-  [[ "$EUID" -eq 0 ]] || print_error "Скрипт должен запускаться от имени root (используйте sudo)"
-}
-
-get_public_ip() {
-  curl -4s https://icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}' | cut -d' ' -f1
-}
-
-prompt_domain() {
-  print_step "Настройка домена"
-  
-  if [[ -n "$DOMAIN" ]]; then
-    print_info "Используется домен из переменной окружения: ${DOMAIN}"
-    check_dns_configuration
-    return
-  fi
-  
-  local existing_domain=""
-  if [[ -f "$XRAY_CONFIG" ]] && command -v jq &>/dev/null; then
-    existing_domain=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0] // empty' "$XRAY_CONFIG" 2>/dev/null || echo "")
-  fi
-  
-  if [[ -n "$existing_domain" && "$existing_domain" != "null" ]]; then
-    local use_existing
-    read -p "$(echo -e "${LIGHT_GRAY}ℹ${RESET} Обнаружен существующий домен: ${BOLD}${existing_domain}${RESET}\nИспользовать его? [Y/n]: ")" use_existing < /dev/tty 2>/dev/null || use_existing="Y"
-    case "${use_existing:-Y}" in
-      [Yy]*|"") 
-        DOMAIN="$existing_domain"
-        check_dns_configuration
-        return 
-        ;;
-      *) ;;
-    esac
-  fi
-  
-  while true; do
-    local input_domain
-    read -p "$(echo -e "${BOLD}Введите Ваш домен${RESET} (например, wishnu.duckdns.org): ")" input_domain < /dev/tty 2>/dev/null || {
-      print_error "Ошибка: требуется терминал для ввода. Запустите скрипт напрямую:\nsudo bash install.sh"
-    }
-    input_domain=$(echo "$input_domain" | tr -d '[:space:]')
-    
-    if [[ -z "$input_domain" ]]; then
-      print_warning "Домен не может быть пустым"
-      continue
-    fi
-    
-    if [[ ! "$input_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
-      print_warning "Неверный формат домена (пример: ваш-домен.duckdns.org)"
-      continue
-    fi
-    
-    DOMAIN="$input_domain"
-    break
-  done
-  
-  check_dns_configuration
 }
 
 # ============================================================================
@@ -274,7 +292,7 @@ optimize_swap() {
   if [[ "$total_mem" -lt 2048 ]]; then
     if [[ ! -f /swapfile ]]; then
       local swap_size=$(( (2048 - total_mem) / 1024 + 1 ))
-      print_info "Создание ${swap_size}G swap (доступно RAM: ${total_mem}M)..."
+      print_info "Создание ${swap_size}G swap (RAM: ${total_mem}M)..."
       dd if=/dev/zero of=/swapfile bs=1G count="$swap_size" status=none 2>/dev/null
       chmod 600 /swapfile
       mkswap /swapfile >/dev/null
@@ -372,7 +390,7 @@ configure_firewall() {
   if ufw status | grep -q "Status: active"; then
     print_success "Фаервол активен (порты 22/80/443 открыты)"
   else
-    print_warning "UFW активирован с предупреждениями (проверьте: ufw status)"
+    print_warning "UFW активирован с предупреждениями"
   fi
 }
 
@@ -526,7 +544,7 @@ configure_caddy() {
   print_substep "Настройка Caddy (схема steal-itself)"
   
   if [[ -z "$DOMAIN" ]]; then
-    print_error "Переменная DOMAIN не установлена. Укажите домен перед запуском скрипта."
+    print_error "Переменная DOMAIN не установлена"
   fi
   
   free_ports
@@ -566,7 +584,7 @@ EOF
   
   print_info "Валидация конфигурации Caddy..."
   if ! caddy validate --config "$CADDYFILE" 2>&1; then
-    print_error "Ошибка валидации Caddyfile. Проверьте синтаксис конфигурации."
+    print_error "Ошибка валидации Caddyfile"
   fi
   
   print_success "Конфигурация Caddy валидна"
@@ -584,11 +602,11 @@ EOF
 }
 
 # ============================================================================
-# Xray (с правильным официальным установщиком)
+# Xray (только официальный установщик)
 # ============================================================================
 
 install_xray() {
-  print_substep "Установка Xray core"
+  print_substep "Установка Xray core (официальный установщик)"
   
   if command -v xray &>/dev/null; then
     print_info "Xray уже установлен (версия: $(xray version 2>/dev/null | head -n1 || echo 'unknown'))"
@@ -596,81 +614,21 @@ install_xray() {
   fi
   
   ensure_dependency "curl" "curl"
-  ensure_dependency "unzip" "unzip"
   
-  # Правильный официальный установщик из репозитория XTLS/Xray-install
-  local install_success=false
-  for attempt in {1..3}; do
-    print_info "Попытка установки Xray (попытка ${attempt}/3)..."
-    if bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1; then
-      install_success=true
-      break
-    fi
-    sleep 2
-  done
-  
-  if [[ "$install_success" == false ]]; then
-    print_warning "Официальный установщик не сработал, используется резервный метод..."
-    
-    # Резервный метод: прямая загрузка последней версии
-    local version
-    version=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep -oP '"tag_name": "\Kv[^"]+' || echo "v1.8.5")
-    print_info "Используется последняя версия: ${version}"
-    
-    local arch
-    case "$(uname -m)" in
-      x86_64)   arch="64" ;;
-      aarch64)  arch="arm64-v8a" ;;
-      armv7l)   arch="arm32-v7a" ;;
-      *) print_error "Неподдерживаемая архитектура: $(uname -m)" ;;
-    esac
-    
-    local tmp_dir
-    tmp_dir=$(mktemp -d)
-    cd "$tmp_dir"
-    
-    local download_success=false
-    for attempt in {1..5}; do
-      print_info "Загрузка Xray ${version} (попытка ${attempt}/5)..."
-      if curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 \
-        "https://github.com/XTLS/Xray-core/releases/download/${version}/Xray-linux-${arch}.zip" \
-        -o xray.zip; then
-        download_success=true
-        break
-      fi
-      sleep 3
-    done
-    
-    if [[ "$download_success" == false ]]; then
-      print_info "Пробуем альтернативный источник..."
-      if curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 \
-        "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${arch}.zip" \
-        -o xray.zip; then
-        download_success=true
-      fi
-    fi
-    
-    if [[ "$download_success" == false ]]; then
-      rm -rf "$tmp_dir"
-      print_error "Не удалось загрузить Xray после 5 попыток. Проверьте сетевое подключение."
-    fi
-    
-    unzip -o xray.zip xray >/dev/null 2>&1
-    install -m 755 xray /usr/local/bin/
-    rm -rf "$tmp_dir"
-    
-    id xray &>/dev/null || useradd -s /usr/sbin/nologin -r -d /usr/local/etc/xray xray
-    
-    print_success "Xray установлен вручную (версия: ${version})"
-  else
-    print_success "Xray установлен официальным установщиком (версия: $(xray version 2>/dev/null | head -n1 || echo 'unknown'))"
+  # Только официальный установщик — без резервных методов
+  print_info "Загрузка официального установщика Xray..."
+  if ! bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1; then
+    print_error "Не удалось установить Xray официальным установщиком. Проверьте сетевое подключение."
   fi
+  
+  print_success "Xray установлен (версия: $(xray version 2>/dev/null | head -n1 || echo 'unknown'))"
 }
 
 generate_xray_config() {
   print_substep "Генерация криптографических параметров"
   
   mkdir -p /usr/local/etc/xray
+  mkdir -p "$XRAY_DAT_DIR"
   
   local secret_path uuid priv_key pub_key short_id
   
@@ -793,7 +751,7 @@ EOF
   
   print_info "Валидация конфигурации Xray..."
   if ! xray test --config "$XRAY_CONFIG" 2>&1; then
-    print_error "Ошибка валидации конфигурации Xray. Проверьте синтаксис."
+    print_error "Ошибка валидации конфигурации Xray"
   fi
   
   print_success "Конфигурация Xray валидна"
@@ -812,6 +770,164 @@ EOF
     journalctl -u xray -n 20 --no-pager > /tmp/xray-errors.log 2>&1 || true
     print_error "Не удалось запустить Xray. Проверьте логи: journalctl -u xray -n 50"
   fi
+}
+
+# ============================================================================
+# Автоматические обновления
+# ============================================================================
+
+setup_auto_updates() {
+  print_step "Настройка автоматических обновлений"
+  
+  # 1. Скрипт обновления ядра Xray
+  cat > /usr/local/bin/xray-update-core <<'EOF_UPDATE_CORE'
+#!/bin/bash
+set -euo pipefail
+
+LOG_FILE="/var/log/xray-core-update.log"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Начало обновления Xray core" >> "$LOG_FILE"
+
+CURRENT_VERSION=$(xray version 2>/dev/null | head -n1 || echo "unknown")
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Текущая версия: ${CURRENT_VERSION}" >> "$LOG_FILE"
+
+# Официальный установщик всегда устанавливает последнюю версию
+if bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >> "$LOG_FILE" 2>&1; then
+  NEW_VERSION=$(xray version 2>/dev/null | head -n1 || echo "unknown")
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Установлена версия: ${NEW_VERSION}" >> "$LOG_FILE"
+  
+  if systemctl is-active --quiet xray; then
+    systemctl restart xray >> "$LOG_FILE" 2>&1
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Сервис Xray перезапущен" >> "$LOG_FILE"
+  fi
+  
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Обновление успешно завершено" >> "$LOG_FILE"
+  exit 0
+else
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Ошибка обновления" >> "$LOG_FILE"
+  exit 1
+fi
+EOF_UPDATE_CORE
+  
+  chmod +x /usr/local/bin/xray-update-core
+  print_success "Скрипт обновления ядра: /usr/local/bin/xray-update-core"
+  
+  # 2. Скрипт обновления Geo-файлов
+  cat > /usr/local/bin/xray-update-geo <<'EOF_UPDATE_GEO'
+#!/bin/bash
+set -euo pipefail
+
+LOG_FILE="/var/log/xray-geo-update.log"
+DAT_DIR="/usr/local/share/xray"
+TEMP_DIR=$(mktemp -d)
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Начало обновления Geo-файлов" >> "$LOG_FILE"
+
+# Загрузка последних версий от v2fly
+curl -fsSL "https://github.com/v2fly/geoip/releases/latest/download/geoip.dat" -o "${TEMP_DIR}/geoip.dat" >> "$LOG_FILE" 2>&1
+curl -fsSL "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat" -o "${TEMP_DIR}/geosite.dat" >> "$LOG_FILE" 2>&1
+
+# Проверка целостности файлов
+if ! file "${TEMP_DIR}/geoip.dat" | grep -q "data"; then
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Ошибка: повреждённый geoip.dat" >> "$LOG_FILE"
+  rm -rf "$TEMP_DIR"
+  exit 1
+fi
+
+if ! file "${TEMP_DIR}/geosite.dat" | grep -q "data"; then
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Ошибка: повреждённый geosite.dat" >> "$LOG_FILE"
+  rm -rf "$TEMP_DIR"
+  exit 1
+fi
+
+# Установка файлов
+install -m 644 "${TEMP_DIR}/geoip.dat" "${DAT_DIR}/geoip.dat" >> "$LOG_FILE" 2>&1
+install -m 644 "${TEMP_DIR}/geosite.dat" "${DAT_DIR}/geosite.dat" >> "$LOG_FILE" 2>&1
+
+rm -rf "$TEMP_DIR"
+
+# Перезапуск Xray для применения новых правил
+if systemctl is-active --quiet xray; then
+  systemctl restart xray >> "$LOG_FILE" 2>&1
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Geo-файлы обновлены, Xray перезапущен" >> "$LOG_FILE"
+else
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Geo-файлы обновлены (сервис не активен)" >> "$LOG_FILE"
+fi
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Обновление Geo-файлов завершено" >> "$LOG_FILE"
+exit 0
+EOF_UPDATE_GEO
+  
+  chmod +x /usr/local/bin/xray-update-geo
+  print_success "Скрипт обновления Geo: /usr/local/bin/xray-update-geo"
+  
+  # 3. Systemd timer для обновления ядра (каждое воскресенье в 3:00)
+  cat > /etc/systemd/system/xray-core-update.service <<EOF
+[Unit]
+Description=Update Xray Core
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/xray-update-core
+User=root
+StandardOutput=append:/var/log/xray-core-update.log
+StandardError=append:/var/log/xray-core-update.log
+EOF
+
+  cat > /etc/systemd/system/xray-core-update.timer <<EOF
+[Unit]
+Description=Weekly Xray Core Update
+After=network-online.target
+
+[Timer]
+OnCalendar=Sun 03:00
+Persistent=true
+Unit=xray-core-update.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable xray-core-update.timer --now >/dev/null 2>&1
+  print_success "Таймер обновления ядра активирован (каждое воскресенье 03:00)"
+  
+  # 4. Systemd timer для обновления Geo-файлов (каждую среду в 3:00)
+  cat > /etc/systemd/system/xray-geo-update.service <<EOF
+[Unit]
+Description=Update Xray Geo Files
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/xray-update-geo
+User=root
+StandardOutput=append:/var/log/xray-geo-update.log
+StandardError=append:/var/log/xray-geo-update.log
+EOF
+
+  cat > /etc/systemd/system/xray-geo-update.timer <<EOF
+[Unit]
+Description=Weekly Xray Geo Files Update
+After=network-online.target
+
+[Timer]
+OnCalendar=Wed 03:00
+Persistent=true
+Unit=xray-geo-update.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable xray-geo-update.timer --now >/dev/null 2>&1
+  print_success "Таймер обновления Geo активирован (каждую среду 03:00)"
+  
+  # 5. Ручные команды для обновления
+  print_info "Ручное обновление ядра:   sudo xray-update-core"
+  print_info "Ручное обновление Geo:    sudo xray-update-geo"
+  print_info "Статус таймеров:          systemctl list-timers | grep xray"
 }
 
 # ============================================================================
@@ -942,9 +1058,18 @@ create_help_file() {
   user rm      Удалить пользователя
   user link    Сгенерировать ссылку подключения
 
+АВТОМАТИЧЕСКИЕ ОБНОВЛЕНИЯ
+  • Ядро Xray: каждое воскресенье в 03:00
+  • Geo-файлы: каждую среду в 03:00
+  
+  Ручное обновление ядра:   sudo xray-update-core
+  Ручное обновление Geo:    sudo xray-update-geo
+  Статус таймеров:          systemctl list-timers | grep xray
+
 ВАЖНЫЕ ФАЙЛЫ
   Конфигурация:  /usr/local/etc/xray/config.json
   Ключи/Параметры: /usr/local/etc/xray/.keys
+  Geo-файлы:     /usr/local/share/xray/{geoip,geosite}.dat
   Конфиг Caddy:  /etc/caddy/Caddyfile
   Сайт маскировки: /var/www/html/
 
@@ -966,11 +1091,6 @@ create_help_file() {
   • Невалидные XHTTP-пути → тот же сайт через fallback
   • Валидные XHTTP-пути → прямой доступ в интернет
   • Весь трафик выглядит как легитимные посещения сайта
-
-ТРЕБОВАНИЯ К КЛИЕНТАМ
-  • v2rayNG (Android) версия 24.04.0+
-  • Shadowrocket (iOS) с поддержкой XHTTP
-  • Sing-box (кроссплатформенный)
 EOF_HELP
   
   chmod 644 "$HELP_FILE"
@@ -1016,6 +1136,7 @@ main() {
   ensure_dependency "ca-certificates" "update-ca-certificates"
   ensure_dependency "unzip" "unzip"
   ensure_dependency "iproute2" "ss"
+  ensure_dependency "qrencode" "qrencode"
   
   print_success "Все зависимости установлены"
   
@@ -1029,6 +1150,9 @@ main() {
   print_step "Xray Core"
   install_xray
   generate_xray_config
+  
+  print_step "Автоматические обновления"
+  setup_auto_updates
   
   print_step "Утилиты управления"
   create_user_utility
@@ -1052,20 +1176,22 @@ main() {
   echo
   
   echo -e "${BOLD}Управление:${RESET}"
-  echo -e "  ${MEDIUM_GRAY}user list${RESET}    # Список клиентов"
-  echo -e "  ${MEDIUM_GRAY}user add${RESET}     # Создать пользователя"
-  echo -e "  ${MEDIUM_GRAY}cat ~/help${RESET}   # Полная документация"
+  echo -e "  ${MEDIUM_GRAY}user list${RESET}         # Список клиентов"
+  echo -e "  ${MEDIUM_GRAY}user add${RESET}          # Создать пользователя"
+  echo -e "  ${MEDIUM_GRAY}xray-update-core${RESET}  # Обновить ядро Xray"
+  echo -e "  ${MEDIUM_GRAY}xray-update-geo${RESET}   # Обновить Geo-файлы"
+  echo -e "  ${MEDIUM_GRAY}cat ~/help${RESET}        # Полная документация"
   echo
   
-  echo -e "${BOLD}Статус оптимизаций:${RESET}"
-  echo -e "  • BBR:        $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo 'unknown')"
-  echo -e "  • Fail2Ban:   $(systemctl is-active fail2ban 2>/dev/null || echo 'inactive')"
-  echo -e "  • Фаервол:    $(ufw status numbered 2>/dev/null | grep -c "ALLOW" || echo 'inactive') правила"
+  echo -e "${BOLD}Автоматические обновления:${RESET}"
+  echo -e "  • Ядро Xray:   каждое воскресенье в 03:00"
+  echo -e "  • Geo-файлы:   каждую среду в 03:00"
+  echo -e "  • Статус:      systemctl list-timers | grep xray"
   echo
   
   echo -e "${SOFT_YELLOW}⚠${RESET} SSL-сертификат будет автоматически получен при первом обращении к ${BOLD}https://${DOMAIN}${RESET}"
   echo
-  echo -e "${LIGHT_GRAY}Подробный лог установки: ${LOG_FILE}${RESET}"
+  echo -e "${LIGHT_GRAY}Лог установки: ${LOG_FILE}${RESET}"
   echo
 }
 
