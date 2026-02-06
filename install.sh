@@ -74,53 +74,56 @@ prompt_domain() {
   
   # Если домен задан через переменную окружения — использовать его
   if [[ -n "$DOMAIN" ]]; then
-    print_info "Домен из переменной окружения: ${DOMAIN}"
-  else
-    # Попытка обнаружить существующий домен из конфигурации
-    local existing_domain=""
-    if [[ -f "$XRAY_CONFIG" ]] && command -v jq &>/dev/null; then
-      existing_domain=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0] // empty' "$XRAY_CONFIG" 2>/dev/null || echo "")
-    fi
-    
-    if [[ -n "$existing_domain" && "$existing_domain" != "null" ]]; then
-      read -p "$(echo -e "${LIGHT_GRAY}ℹ${RESET} Обнаружен существующий домен: ${BOLD}${existing_domain}${RESET}\nИспользовать его? [Y/n]: ")" use_existing < /dev/tty 2>/dev/null || use_existing="Y"
-      case "${use_existing:-Y}" in
-        [Yy]*|"") DOMAIN="$existing_domain"; print_success "Домен: ${DOMAIN}"; return ;;
-        *) ;;
-      esac
-    fi
-    
-    # Интерактивный запрос
-    while true; do
-      read -p "$(echo -e "${LIGHT_GRAY}Введите ваш домен${RESET} (например, wishnu.duckdns.org): ")" input_domain < /dev/tty 2>/dev/null || { print_error "Требуется интерактивный ввод домена. Запустите скрипт напрямую: sudo bash install.sh"; }
-      input_domain=$(echo "$input_domain" | tr -d '[:space:]')
-      
-      if [[ -z "$input_domain" ]]; then
-        print_warning "Домен не может быть пустым"
-        continue
-      fi
-      
-      # Валидация домена
-      if [[ ! "$input_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
-        print_warning "Неверный формат домена (пример: example.com)"
-        continue
-      fi
-      
-      # Проверка доступности домена (не критично)
-      if ! timeout 3 curl -sI "http://${input_domain}" &>/dev/null; then
-        read -p "$(echo -e "${SOFT_YELLOW}⚠${RESET} Домен ${BOLD}${input_domain}${RESET} может быть недоступен.\nПродолжить? [Y/n]: ")" confirm < /dev/tty 2>/dev/null || confirm="Y"
-        [[ ! "$confirm" =~ ^[Yy]$ ]] && continue
-      fi
-      
-      DOMAIN="$input_domain"
-      break
-    done
+    print_info "Используется домен из переменной окружения: ${DOMAIN}"
+    SERVER_IP=$(get_public_ip)
+    print_success "Домен: ${DOMAIN}"
+    print_info "IP-адрес сервера: ${SERVER_IP}"
+    return
   fi
   
-  # Финальная проверка домена
-  if [[ -z "$DOMAIN" ]]; then
-    print_error "Домен не установлен. Укажите через переменную: DOMAIN=ваш.домен sudo bash install.sh"
+  # Попытка обнаружить существующий домен из конфигурации
+  local existing_domain=""
+  if [[ -f "$XRAY_CONFIG" ]] && command -v jq &>/dev/null; then
+    existing_domain=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0] // empty' "$XRAY_CONFIG" 2>/dev/null || echo "")
   fi
+  
+  if [[ -n "$existing_domain" && "$existing_domain" != "null" ]]; then
+    local use_existing
+    read -p "$(echo -e "${LIGHT_GRAY}ℹ${RESET} Обнаружен существующий домен: ${BOLD}${existing_domain}${RESET}\nИспользовать его? [Y/n]: ")" use_existing < /dev/tty 2>/dev/null || use_existing="Y"
+    case "${use_existing:-Y}" in
+      [Yy]*|"") 
+        DOMAIN="$existing_domain"
+        SERVER_IP=$(get_public_ip)
+        print_success "Домен: ${DOMAIN}"
+        print_info "IP-адрес сервера: ${SERVER_IP}"
+        return 
+        ;;
+      *) ;;
+    esac
+  fi
+  
+  # Интерактивный запрос с понятной подсказкой
+  while true; do
+    local input_domain
+    read -p "$(echo -e "${BOLD}Введите Ваш домен${RESET} (например, wishnu.duckdns.org): ")" input_domain < /dev/tty 2>/dev/null || {
+      print_error "Ошибка: требуется терминал для ввода. Запустите скрипт напрямую:\nsudo bash install.sh"
+    }
+    input_domain=$(echo "$input_domain" | tr -d '[:space:]')
+    
+    if [[ -z "$input_domain" ]]; then
+      print_warning "Домен не может быть пустым"
+      continue
+    fi
+    
+    # Валидация домена
+    if [[ ! "$input_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
+      print_warning "Неверный формат домена (пример: ваш-домен.duckdns.org)"
+      continue
+    fi
+    
+    DOMAIN="$input_domain"
+    break
+  done
   
   SERVER_IP=$(get_public_ip)
   print_success "Домен: ${DOMAIN}"
@@ -238,7 +241,6 @@ configure_firewall() {
   
   # Принудительное включение с подавлением ошибок IPv6
   ufw --force enable >/dev/null 2>&1 || {
-    # Если основной метод не сработал, пробуем без проверки состояния
     ufw enable 2>&1 | grep -v "ip6tables" || true
   }
   
@@ -411,8 +413,7 @@ configure_caddy() {
     cp "$CADDYFILE" "${CADDYFILE}.backup-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
   fi
   
-  # Генерация конфигурации с экранированием домена
-  # ВАЖНО: Убран блок 'protocol' для совместимости с Caddy v2.10.2
+  # Совместимая конфигурация для Caddy v2.10.2 (без experimental_http3)
   cat > "$CADDYFILE" <<EOF
 {
   admin off
@@ -445,7 +446,7 @@ http://127.0.0.1:8001 {
 }
 EOF
   
-  # Валидация конфигурации с подробным выводом ошибок
+  # Валидация конфигурации
   if ! caddy validate --config "$CADDYFILE" 2>&1; then
     print_error "Ошибка валидации Caddyfile. Проверьте синтаксис конфигурации."
   fi
@@ -633,7 +634,7 @@ EOF
   chown -R xray:xray /usr/local/etc/xray 2>/dev/null || true
   chmod 644 "$XRAY_CONFIG"
   
-  # Перезапуск сервиса только при изменении конфигурации
+  # Перезапуск сервиса
   if systemctl is-active --quiet xray 2>/dev/null; then
     systemctl restart xray >/dev/null 2>&1
   else
@@ -698,7 +699,8 @@ case "${ACTION}" in
     command -v qrencode &>/dev/null && { echo "QR-код:"; echo "${link}" | qrencode -t ansiutf8; }
     ;;
   add)
-    read -p "Имя пользователя (латиница, без пробелов): " email < /dev/tty 2>/dev/null || { echo "Ошибка: требуется интерактивный ввод"; exit 1; }
+    local email
+    read -p "Имя пользователя (латиница, без пробелов): " email < /dev/tty 2>/dev/null || { echo "Ошибка: требуется терминал"; exit 1; }
     [[ -z "${email}" || "${email}" =~ [^a-zA-Z0-9_-] ]] && { echo "Ошибка: недопустимое имя"; exit 1; }
     jq -e ".inbounds[0].settings.clients[] | select(.email==\"${email}\")" "${XRAY_CONFIG}" &>/dev/null && { echo "Ошибка: пользователь существует"; exit 1; }
     local uuid
@@ -711,10 +713,11 @@ case "${ACTION}" in
     command -v qrencode &>/dev/null && { echo -e "\nQR-код:"; echo "${link}" | qrencode -t ansiutf8; }
     ;;
   rm)
-    local clients
+    local clients=()
     mapfile -t clients < <(jq -r '.inbounds[0].settings.clients[].email' "${XRAY_CONFIG}" 2>/dev/null || echo "")
     [[ ${#clients[@]} -lt 2 ]] && { echo "Нет пользователей для удаления"; exit 1; }
     echo "Выберите пользователя для удаления:"; for i in "${!clients[@]}"; do echo "$((i+1)). ${clients[$i]}"; done
+    local num
     read -p "Номер: " num < /dev/tty 2>/dev/null || { echo "Ошибка: требуется ввод"; exit 1; }
     [[ ! "${num}" =~ ^[0-9]+$ || "${num}" -lt 1 || "${num}" -gt ${#clients[@]} ]] && { echo "Ошибка: неверный номер"; exit 1; }
     [[ "${clients[$((num-1))]}" == "main" ]] && { echo "Ошибка: нельзя удалить основного пользователя"; exit 1; }
@@ -723,10 +726,11 @@ case "${ACTION}" in
     echo "Пользователь '${clients[$((num-1))]}' удалён"
     ;;
   link)
-    local clients
+    local clients=()
     mapfile -t clients < <(jq -r '.inbounds[0].settings.clients[].email' "${XRAY_CONFIG}" 2>/dev/null || echo "")
     [[ ${#clients[@]} -eq 0 ]] && { echo "Нет клиентов"; exit 1; }
     echo "Выберите клиента:"; for i in "${!clients[@]}"; do echo "$((i+1)). ${clients[$i]}"; done
+    local num
     read -p "Номер: " num < /dev/tty 2>/dev/null || { echo "Ошибка: требуется ввод"; exit 1; }
     [[ ! "${num}" =~ ^[0-9]+$ || "${num}" -lt 1 || "${num}" -gt ${#clients[@]} ]] && { echo "Ошибка: неверный номер"; exit 1; }
     local uuid
@@ -832,10 +836,10 @@ main() {
   configure_firewall
   configure_fail2ban
   
-  # Фаза 4: Зависимости
+  # Фаза 4: Зависимости (без интерактивных запросов)
   print_step "Установка зависимостей"
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update >/dev/null 2>&1
+  apt-get update >/dev/null 2>&1 || true
   apt-get install -y curl jq socat qrencode git wget gnupg ca-certificates unzip >/dev/null 2>&1
   print_success "Зависимости установлены"
   
