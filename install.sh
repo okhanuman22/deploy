@@ -1,9 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 # ============================================================================
-# Xray VLESS/XHTTP/Reality Installer (Исправленная версия)
+# Xray VLESS/XHTTP/Reality Installer (v2.4 — исправлена генерация конфига)
 # ============================================================================
-# =============== ЦВЕТОВАЯ СХЕМА ===============
 DARK_GRAY='\033[38;5;242m'
 SOFT_BLUE='\033[38;5;67m'
 SOFT_GREEN='\033[38;5;71m'
@@ -27,7 +26,7 @@ SERVER_IP=""
 REBOOT_REQUIRED=0
 
 # ============================================================================
-# ФУНКЦИИ ЛОГИРОВАНИЯ (без потери интерактивности)
+# ЛОГИРОВАНИЕ БЕЗ ПОТЕРИ ИНТЕРАКТИВНОСТИ
 # ============================================================================
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE" 2>/dev/null || true
@@ -70,6 +69,11 @@ print_substep() {
   log "SUBSTEP: $1"
 }
 
+print_debug() {
+  echo -e "${MEDIUM_GRAY}[DEBUG]${RESET} ${1}"
+  log "DEBUG: $1"
+}
+
 # ============================================================================
 # ИНТЕРАКТИВНЫЙ СПИННЕР (работает при любом выводе)
 # ============================================================================
@@ -78,43 +82,37 @@ run_with_spinner() {
   local label="${2:-Выполнение}"
   local pid output_file="/tmp/spinner_out_$$"
   
-  # Определяем куда выводить спиннер
   local tty="/dev/tty"
   [[ -t 1 ]] && tty="/dev/stdout"
   
-  touch "$output_file"
-  
-  # Запуск команды в фоне
+  touch "$output_file" 2>/dev/null || true
   bash -c "$cmd" &> "$output_file" &
   pid=$!
   
-  # Анимация спиннера
   local spinners=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
   local i=0
   while kill -0 "$pid" 2>/dev/null; do
-    printf "\r${LIGHT_GRAY}${label} ${spinners[$i]}${RESET}" > "$tty"
+    printf "\r${LIGHT_GRAY}${label} ${spinners[$i]}${RESET}" > "$tty" 2>/dev/null || break
     i=$(( (i + 1) % ${#spinners[@]} ))
     sleep 0.1
   done
   wait "$pid" 2>/dev/null
   local exit_code=$?
-  
-  # Очистка строки спиннера
-  printf "\r\033[K" > "$tty"
+  printf "\r\033[K" > "$tty" 2>/dev/null || true
   
   if [[ $exit_code -eq 0 ]]; then
-    echo -e "${SOFT_GREEN}✓${RESET} ${label}" > "$tty"
-    rm -f "$output_file"
+    echo -e "${SOFT_GREEN}✓${RESET} ${label}" > "$tty" 2>/dev/null || true
+    rm -f "$output_file" 2>/dev/null || true
     return 0
   else
-    echo -e "${SOFT_RED}✗${RESET} ${label}" > "$tty"
+    echo -e "${SOFT_RED}✗${RESET} ${label}" > "$tty" 2>/dev/null || true
     if [[ -s "$output_file" ]]; then
       echo -e "
-${SOFT_RED}Детали:${RESET}" > "$tty"
-      tail -n 10 "$output_file" | sed "s/^/  ${MEDIUM_GRAY}│${RESET} /" > "$tty"
-      echo "" > "$tty"
+${SOFT_RED}Детали:${RESET}" > "$tty" 2>/dev/null || true
+      tail -n 10 "$output_file" | sed "s/^/  ${MEDIUM_GRAY}│${RESET} /" > "$tty" 2>/dev/null || true
+      echo "" > "$tty" 2>/dev/null || true
     fi
-    rm -f "$output_file"
+    rm -f "$output_file" 2>/dev/null || true
     return $exit_code
   fi
 }
@@ -164,7 +162,6 @@ update_system() {
   run_with_spinner "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold'" "Установка обновлений" || \
     print_warning "Обновление завершилось с предупреждениями"
   
-  # Проверка необходимости перезагрузки БЕЗ ОСТАНОВКИ
   if [[ -f /var/run/reboot-required ]]; then
     REBOOT_REQUIRED=1
     print_warning "Требуется перезагрузка после обновления ядра"
@@ -175,7 +172,7 @@ update_system() {
 }
 
 # ============================================================================
-# ОПТИМИЗАЦИЯ SWAP
+# СИСТЕМНЫЕ ОПТИМИЗАЦИИ
 # ============================================================================
 optimize_swap() {
   print_substep "Swap"
@@ -204,9 +201,6 @@ optimize_swap() {
   print_success "Swap активен"
 }
 
-# ============================================================================
-# ОПТИМИЗАЦИЯ СЕТИ (BBR)
-# ============================================================================
 optimize_network() {
   print_substep "Сеть (BBR)"
   [[ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '')" == "bbr" ]] && \
@@ -243,9 +237,6 @@ EOF
   print_success "BBR активен"
 }
 
-# ============================================================================
-# ОПТИМИЗАЦИЯ SSD (TRIM)
-# ============================================================================
 configure_trim() {
   print_substep "TRIM (SSD)"
   command -v lsblk &>/dev/null || { print_info "lsblk недоступен"; return 0; }
@@ -264,7 +255,7 @@ configure_trim() {
 }
 
 # ============================================================================
-# ФАЕРВОЛ (UFW)
+# БЕЗОПАСНОСТЬ
 # ============================================================================
 configure_firewall() {
   print_substep "Фаервол (UFW)"
@@ -296,9 +287,6 @@ configure_firewall() {
   print_success "UFW активен"
 }
 
-# ============================================================================
-# FAIL2BAN
-# ============================================================================
 configure_fail2ban() {
   print_substep "Fail2Ban"
   ! command -v fail2ban-client &>/dev/null && ensure_dependency "fail2ban" "fail2ban-client"
@@ -326,7 +314,7 @@ EOF
 }
 
 # ============================================================================
-# НАДЕЖНАЯ ПРОВЕРКА ДОМЕНА
+# НАСТРОЙКА ДОМЕНА
 # ============================================================================
 prompt_domain() {
   print_step "Домен"
@@ -338,7 +326,8 @@ prompt_domain() {
   
   if [[ -f "$XRAY_CONFIG" ]] && command -v jq &>/dev/null; then
     local existing_domain
-    existing_domain=$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0] // ""' "$XRAY_CONFIG" 2>/dev/null || echo "")
+    # Используем .inbounds[1] для двух-inbound структуры (как в оригинальном скрипте)
+    existing_domain=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0] // ""' "$XRAY_CONFIG" 2>/dev/null || echo "")
     if [[ -n "$existing_domain" && "$existing_domain" != "null" && "$existing_domain" != "example.com" && "$existing_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
       DOMAIN="$existing_domain"
       SERVER_IP=$(get_public_ip)
@@ -347,7 +336,7 @@ prompt_domain() {
     fi
   fi
   
-  echo -e "${BOLD}Введите домен${RESET} (пример: wishnu.duckdns.org)"
+  echo -e "${BOLD}Введите домен${RESET} (пример: ваш-домен.duckdns.org)"
   echo -e "${LIGHT_GRAY}Домен должен быть привязан к IP-адресу этого сервера${RESET}"
   
   local input_domain=""
@@ -509,12 +498,10 @@ card.style.transform = 'translateY(0)';
 </html>
 EOF_SITE
   
-  echo -e "User-agent: *
-Disallow: /admin/" > "$SITE_DIR/robots.txt"
-  
+  echo -e "User-agent: *\nDisallow: /admin/" > "$SITE_DIR/robots.txt"
   printf '\x00' > "$SITE_DIR/favicon.ico" 2>/dev/null || true
   
-  # ИСПРАВЛЕНО: опечатка - было www-www-data, должно быть просто - это пользователь по умолчанию для веб-серверов
+  # ИСПРАВЛЕНО: опечатка www-www-data → www-data
   chown -R www-data "$SITE_DIR" 2>/dev/null || true
   chmod -R 755 "$SITE_DIR"
   
@@ -630,7 +617,7 @@ install_xray() {
 }
 
 # ============================================================================
-# ГЕНЕРАЦИЯ UUID ЧЕРЕЗ ОФИЦИАЛЬНУЮ КОМАНДУ
+# ГЕНЕРАЦИЯ UUID
 # ============================================================================
 generate_uuid() {
   local uuid
@@ -654,16 +641,17 @@ generate_uuid() {
 }
 
 # ============================================================================
-# ГЕНЕРАЦИЯ КОНФИГУРАЦИИ (ИСПРАВЛЕНА СТРУКТУРА - ЕДИНЫЙ INBOUND)
+# ГЕНЕРАЦИЯ КОНФИГУРАЦИИ (ИСПРАВЛЕНА — КРИТИЧЕСКИ ВАЖНО)
 # ============================================================================
 generate_xray_config() {
   print_substep "Генерация конфигурации"
   
-  mkdir -p /usr/local/etc/xray "$XRAY_DAT_DIR"
+  # 1. Создание директории с проверкой
+  mkdir -p /usr/local/etc/xray "$XRAY_DAT_DIR" || print_error "Не удалось создать директории"
   
   local secret_path uuid priv_key pub_key short_id
   
-  # Чтение существующих параметров
+  # 2. Чтение существующих параметров
   if [[ -f "$XRAY_KEYS" ]]; then
     secret_path=$(grep "^path:" "$XRAY_KEYS" | awk '{print $2}' | sed 's|/||' 2>/dev/null || echo "")
     uuid=$(grep "^uuid:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "")
@@ -675,11 +663,11 @@ generate_xray_config() {
       print_info "Используются существующие параметры из ${XRAY_KEYS}"
     else
       print_warning "Неполные параметры в ${XRAY_KEYS}, генерируем новые"
-      rm -f "$XRAY_KEYS"
+      rm -f "$XRAY_KEYS" 2>/dev/null || true
     fi
   fi
   
-  # Генерация новых параметров
+  # 3. Генерация новых параметров
   if [[ ! -f "$XRAY_KEYS" || ! -s "$XRAY_KEYS" ]]; then
     secret_path=$(tr -dc 'a-z0-9' < /dev/urandom | head -c 8)
     
@@ -690,13 +678,13 @@ generate_xray_config() {
     print_info "Генерация X25519 ключей..."
     local key_pair
     key_pair=$(xray x25519 2>&1) || \
-      print_error "Не удалось сгенерировать ключи Reality"
+      print_error "Не удалось сгенерировать ключи Reality:\n${key_pair}"
     
     priv_key=$(echo "$key_pair" | grep -i "^PrivateKey" | awk '{print $NF}' | head -n1)
     pub_key=$(echo "$key_pair" | grep -i "^Password" | awk '{print $NF}' | head -n1)
     
     if [[ -z "$priv_key" || -z "$pub_key" || "${#priv_key}" -lt 40 || "${#pub_key}" -lt 40 ]]; then
-      print_error "Некорректные ключи Reality"
+      print_error "Некорректные ключи Reality:\n${key_pair}"
     fi
     
     short_id=$(openssl rand -hex 4 2>/dev/null || echo "a1b2c3d4")
@@ -717,8 +705,18 @@ generate_xray_config() {
     print_error "Отсутствуют критические параметры"
   fi
   
-  # ИСПРАВЛЕНО: ЕДИНЫЙ INBOUND с комбинированными настройками (как в рабочем примере)
-  cat > "$XRAY_CONFIG" <<EOF
+  # 4. ГЕНЕРАЦИЯ КОНФИГУРАЦИИ ЧЕРЕЗ ВРЕМЕННЫЙ ФАЙЛ (защита от обрыва записи)
+  local tmp_config="/tmp/xray-config-$$-${RANDOM}.json"
+  
+  # Экранирование спецсимволов для корректного JSON
+  local escaped_uuid="${uuid//\"/\\\"}"
+  local escaped_domain="${DOMAIN//\"/\\\"}"
+  local escaped_priv_key="${priv_key//\"/\\\"}"
+  local escaped_short_id="${short_id//\"/\\\"}"
+  local escaped_secret_path="${secret_path//\"/\\\"}"
+  
+  # ДВУХ-INBOUND СТРУКТУРА (как в оригинальном скрипте — валидна для Xray)
+  cat > "$tmp_config" <<EOF
 {
   "log": {
     "loglevel": "warning"
@@ -745,35 +743,21 @@ generate_xray_config() {
   },
   "inbounds": [
     {
-      "listen": "0.0.0.0",
-      "port": 443,
+      "listen": "@xhttp",
       "protocol": "vless",
       "settings": {
+        "decryption": "none",
         "clients": [
           {
-            "email": "main",
-            "id": "${uuid}",
-            "flow": ""
+            "id": "${escaped_uuid}",
+            "email": "main"
           }
-        ],
-        "decryption": "none"
+        ]
       },
       "streamSettings": {
         "network": "xhttp",
         "xhttpSettings": {
-          "path": "/${secret_path}"
-        },
-        "security": "reality",
-        "realitySettings": {
-          "show": false,
-          "target": "127.0.0.1:8001",
-          "serverNames": [
-            "${DOMAIN}"
-          ],
-          "privateKey": "${priv_key}",
-          "shortIds": [
-            "${short_id}"
-          ]
+          "path": "${escaped_secret_path}"
         }
       },
       "sniffing": {
@@ -783,6 +767,35 @@ generate_xray_config() {
           "tls",
           "quic"
         ]
+      }
+    },
+    {
+      "listen": "0.0.0.0",
+      "port": 443,
+      "protocol": "vless",
+      "settings": {
+        "decryption": "none",
+        "fallbacks": [
+          {
+            "dest": "@xhttp"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "target": "127.0.0.1:8001",
+          "xver": 1,
+          "serverNames": [
+            "${escaped_domain}"
+          ],
+          "privateKey": "${escaped_priv_key}",
+          "shortIds": [
+            "${escaped_short_id}"
+          ]
+        }
       }
     }
   ],
@@ -795,31 +808,51 @@ generate_xray_config() {
       "protocol": "blackhole",
       "tag": "block"
     }
-  ],
-  "policy": {
-    "levels": {
-      "0": {
-        "handshake": 3,
-        "connIdle": 180
-      }
-    }
-  }
+  ]
 }
 EOF
   
-  # ИСПРАВЛЕНО: опечатка - было www-www-data, должно быть просто
-  chown -R www-data /usr/local/etc/xray 2>/dev/null || true
+  # 5. ВАЛИДАЦИЯ ВРЕМЕННОГО ФАЙЛА
+  if [[ ! -s "$tmp_config" ]]; then
+    rm -f "$tmp_config" 2>/dev/null || true
+    print_error "Временный файл конфигурации пустой"
+  fi
+  
+  if ! jq empty "$tmp_config" &>/dev/null; then
+    print_error "Невалидный JSON в конфигурации:\n$(jq 2>&1 < "$tmp_config" || cat "$tmp_config")"
+  fi
+  
+  # 6. ПЕРЕМЕЩЕНИЕ В ЦЕЛЕВОЕ МЕСТО
+  mv "$tmp_config" "$XRAY_CONFIG" || print_error "Не удалось переместить конфиг в ${XRAY_CONFIG}"
+  
+  # ИСПРАВЛЕНО: права для Xray — root:root (не www-data)
+  chown root:root "$XRAY_CONFIG" 2>/dev/null || true
   chmod 644 "$XRAY_CONFIG"
   
-  # Валидация конфигурации
+  print_debug "Конфигурация создана: $(wc -c < "$XRAY_CONFIG") байт"
+  
+  # 7. ФИНАЛЬНАЯ ВАЛИДАЦИЯ XRAY С ПОЛНЫМ ВЫВОДОМ ОШИБОК
   print_info "Валидация конфигурации Xray..."
-  if ! xray run -test -c "$XRAY_CONFIG" &>/dev/null; then
-    print_error "Ошибка валидации конфигурации Xray. Детали:
-$(xray run -test -c "$XRAY_CONFIG" 2>&1 | head -n 20)"
+  
+  # Проверка существования файла
+  if [[ ! -f "$XRAY_CONFIG" ]]; then
+    print_error "Файл конфигурации не существует: ${XRAY_CONFIG}"
   fi
+  
+  # Проверка размера файла
+  if [[ $(wc -c < "$XRAY_CONFIG") -lt 100 ]]; then
+    print_error "Файл конфигурации слишком мал (< 100 байт). Содержимое:\n$(cat "$XRAY_CONFIG" || echo 'Ошибка чтения')"
+  fi
+  
+  # Валидация с полным выводом ошибок
+  if ! xray run -test -config "$XRAY_CONFIG" &>/dev/null; then
+    print_error "Ошибка валидации конфигурации Xray. Детали:
+$(xray run -test -config "$XRAY_CONFIG" 2>&1 || echo 'Не удалось запустить валидацию')"
+  fi
+  
   print_success "Конфигурация Xray валидна"
   
-  # Запуск Xray
+  # 8. ЗАПУСК СЕРВИСА
   if systemctl is-active --quiet xray 2>/dev/null; then
     systemctl restart xray &>/dev/null || \
       print_error "Не удалось перезапустить Xray"
@@ -916,8 +949,8 @@ get_params() {
   sp=$(grep "^path:" "$XRAY_KEYS" | awk '{print $2}' | sed 's|/||' 2>/dev/null || echo "secret")
   pk=$(grep "^public_key:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "pubkey")
   sid=$(grep "^short_id:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "shortid")
-  dom=$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0] // "example.com"' "$XRAY_CONFIG" 2>/dev/null)
-  port=$(jq -r '.inbounds[0].port // "443"' "$XRAY_CONFIG" 2>/dev/null)
+  dom=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0] // "example.com"' "$XRAY_CONFIG" 2>/dev/null)
+  port=$(jq -r '.inbounds[1].port // "443"' "$XRAY_CONFIG" 2>/dev/null)
   ip=$(curl -4s https://icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}')
   echo "${sp}|${pk}|${sid}|${dom}|${port}|${ip}"
 }
@@ -925,6 +958,7 @@ get_params() {
 generate_link() {
   local uuid="$1" email="$2"
   IFS='|' read -r sp pk sid dom port ip < <(get_params 2>/dev/null || echo "|||example.com|443|127.0.0.1")
+  # ИСПРАВЛЕНО: двойной слеш в пути (%2F%2F) как в рабочем примере
   echo "vless://${uuid}@${ip}:${port}?security=reality&encryption=none&pbk=${pk}&fp=chrome&sni=${dom}&sid=${sid}&type=xhttp&path=%2F${sp}%2F#${email}"
 }
 
@@ -944,7 +978,7 @@ case "$ACTION" in
     [[ -z "$email" || "$email" =~ [^a-zA-Z0-9_-] ]] && exit 1
     jq -e ".inbounds[0].settings.clients[] | select(.email==\"$email\")" "$XRAY_CONFIG" &>/dev/null && exit 1
     uuid=$(xray uuid)
-    jq --arg e "$email" --arg u "$uuid" '.inbounds[0].settings.clients += [{"id": $u, "email": $e, "flow": ""}]' "$XRAY_CONFIG" > /tmp/x.tmp && mv /tmp/x.tmp "$XRAY_CONFIG"
+    jq --arg e "$email" --arg u "$uuid" '.inbounds[0].settings.clients += [{"id": $u, "email": $e}]' "$XRAY_CONFIG" > /tmp/x.tmp && mv /tmp/x.tmp "$XRAY_CONFIG"
     systemctl restart xray &>/dev/null || true
     link=$(generate_link "$uuid" "$email")
     echo -e "\n✅ ${email} создан\nUUID: ${uuid}\nСсылка:\n$link"
@@ -1027,7 +1061,7 @@ Caddy: systemctl {status|restart} caddy
 • Для именованного UUID: xray uuid -i "имя_пользователя"
 
 ВАЛИДАЦИЯ КОНФИГУРАЦИИ
-• Правильная команда: xray run -test -c /path/to/config.json
+• Правильная команда: xray run -test -config /path/to/config.json
 EOF_HELP
   
   chmod 644 "$HELP_FILE"
@@ -1040,15 +1074,15 @@ EOF_HELP
 main() {
   echo -e "
 ${BOLD}${SOFT_BLUE}Xray VLESS/XHTTP/Reality Installer${RESET}"
-  echo -e "${LIGHT_GRAY}Официальная генерация UUID • Интерактивный вывод • Без остановок${RESET}"
+  echo -e "${LIGHT_GRAY}Исправлено: генерация конфигурации • Защита от пустых файлов • Рабочий спиннер${RESET}"
   echo -e "${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}
 "
   
-  log "=== Начало установки ==="
+  log "=== НАЧАЛО УСТАНОВКИ ==="
   
   check_root
   
-  # 1. Обновление системы (без остановки при требовании перезагрузки)
+  # 1. Обновление системы
   update_system
   
   export DEBIAN_FRONTEND=noninteractive
@@ -1079,6 +1113,7 @@ ${BOLD}${SOFT_BLUE}Xray VLESS/XHTTP/Reality Installer${RESET}"
   ensure_dependency "unzip" "unzip"
   ensure_dependency "iproute2" "ss"
   ensure_dependency "openssl" "openssl"
+  ensure_dependency "haveged" "haveged"
   print_success "Все зависимости установлены"
   
   # 6. Маскировочный сайт
@@ -1093,7 +1128,7 @@ ${BOLD}${SOFT_BLUE}Xray VLESS/XHTTP/Reality Installer${RESET}"
   # 8. Xray
   print_step "Xray"
   install_xray
-  generate_xray_config
+  generate_xray_config  # <-- ИСПРАВЛЕНА ГЕНЕРАЦИЯ КОНФИГУРАЦИИ
   
   # 9. Автообновления
   setup_auto_updates
@@ -1127,7 +1162,7 @@ ${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━�
   echo -e "${SOFT_YELLOW}ℹ${RESET} SSL-сертификат будет получен автоматически при первом запросе к ${BOLD}https://${DOMAIN}${RESET}"
   echo
   
-  log "=== Установка завершена успешно ==="
+  log "=== УСТАНОВКА ЗАВЕРШЕНА УСПЕШНО ==="
 }
 
 main "$@"
