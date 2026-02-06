@@ -1396,14 +1396,22 @@ main() {
   configure_fail2ban
   
   # ============================================================================
-  # 6. УСТАНОВКА ЗАВИСИМОСТЕЙ (все функции уже определены!)
+  # 6. УСТАНОВКА ЗАВИСИМОСТЕЙ (ПРАВИЛЬНЫЙ МАППИНГ ПАКЕТ → КОМАНДА)
   # ============================================================================
   print_step "Установка зависимостей"
   
-  local deps=("curl" "jq" "socat" "git" "wget" "gnupg" "ca-certificates" "unzip" "iproute2" "openssl")
-  for dep in "${deps[@]}"; do
-    ensure_dependency "$dep" "$dep"
-  done
+  # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: правильный маппинг пакет → команда
+  ensure_dependency "curl" "curl"
+  ensure_dependency "jq" "jq"
+  ensure_dependency "socat" "socat"
+  ensure_dependency "git" "git"
+  ensure_dependency "wget" "wget"
+  ensure_dependency "gnupg" "gpg"          # ← ИСПРАВЛЕНО: пакет gnupg → команда gpg
+  ensure_dependency "ca-certificates" "-"  # ← Пакет без исполняемого файла
+  ensure_dependency "unzip" "unzip"
+  ensure_dependency "iproute2" "ss"        # ← Пакет iproute2 → команда ss
+  ensure_dependency "openssl" "openssl"
+  ensure_dependency "haveged" "haveged"    # ← Для надёжности (уже установлен в prepare_system)
   
   print_success "Все зависимости установлены"
   
