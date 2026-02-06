@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 # ============================================================================
-# Xray VLESS/XHTTP/Reality Installer (Исправленная версия)
+# Xray VLESS/XHTTP/Reality Installer (v2.10 — исправлена генерация конфига)
 # ============================================================================
 DARK_GRAY='\033[38;5;242m'
 SOFT_BLUE='\033[38;5;67m'
@@ -536,24 +536,43 @@ install_xray() {
   print_success "Xray установлен (${version})"
 }
 
-generate_uuid() {
+generate_uuid_safe() {
+  print_substep "Проверка энтропии"
+  local avail
+  avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo "0")
+  
+  if [[ "$avail" -lt 200 ]]; then
+    print_warning "Низкая энтропия (${avail} бит). Устанавливаем haveged..."
+    ensure_dependency "haveged" "haveged"
+    systemctl start haveged &>/dev/null || true
+    sleep 2
+    avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo "0")
+    print_info "Энтропия: ${avail} бит"
+  else
+    print_info "Энтропия достаточна (${avail} бит)"
+  fi
+  
+  print_info "Генерация UUID через 'xray uuid' (таймаут 20 сек)..."
   local uuid
-  if ! uuid=$(timeout 15 xray uuid 2>/dev/null); then
-    print_error "Генерация UUID превысила 15 секунд.
-Решение:
-1. Убедитесь, что Xray установлен: xray version
-2. Проверьте права: ls -la /usr/local/bin/xray
-3. Попробуйте вручную: sudo xray uuid"
+  if ! uuid=$(timeout 20 xray uuid 2>/dev/null); then
+    print_error "Генерация UUID превысила 20 секунд.
+Возможные причины:
+• Недостаток энтропии (установлен haveged, но требуется время)
+• Проблемы с /dev/random
+Решение: выполните вручную 'xray uuid' и перезапустите скрипт"
   fi
+  
   if [[ -z "$uuid" || ! "$uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
-    print_error "Некорректный UUID от 'xray uuid': '$uuid'
-Диагностика:
-• Проверьте вывод: xray uuid
-• Убедитесь, что используется Xray ≥ v1.8.0"
+    print_error "Некорректный UUID: '$uuid'
+Проверьте вывод: xray uuid"
   fi
+  
   echo "$uuid"
 }
 
+# ============================================================================
+# ГЕНЕРАЦИЯ КОНФИГУРАЦИИ (ИСПРАВЛЕНА — КРИТИЧЕСКИ ВАЖНО)
+# ============================================================================
 generate_xray_config() {
   print_substep "Генерация конфигурации"
   mkdir -p /usr/local/etc/xray "$XRAY_DAT_DIR"
@@ -574,7 +593,7 @@ generate_xray_config() {
   if [[ ! -f "$XRAY_KEYS" || ! -s "$XRAY_KEYS" ]]; then
     secret_path=$(tr -dc 'a-z0-9' < /dev/urandom | head -c 8)
     print_info "Генерация UUID через 'xray uuid'..."
-    uuid=$(generate_uuid)
+    uuid=$(generate_uuid_safe)
     print_success "UUID сгенерирован: ${uuid:0:8}..."
     print_info "Генерация X25519 ключей..."
     local key_pair
@@ -598,8 +617,19 @@ generate_xray_config() {
   if [[ -z "$secret_path" || -z "$uuid" || -z "$priv_key" || -z "$pub_key" || -z "$short_id" ]]; then
     print_error "Отсутствуют критические параметры"
   fi
-  # ИСПРАВЛЕНО: путь со слешем в начале!
-  cat > "$XRAY_CONFIG" <<EOF
+  
+  # ИСПРАВЛЕНО: ГЕНЕРАЦИЯ ЧЕРЕЗ ВРЕМЕННЫЙ ФАЙЛ С ПРАВИЛЬНЫМ HEREDOC
+  local tmp_config="/tmp/xray-config-$$-${RANDOM}.json"
+  
+  # Экранирование спецсимволов для безопасности JSON
+  local escaped_uuid="${uuid//\"/\\\"}"
+  local escaped_domain="${DOMAIN//\"/\\\"}"
+  local escaped_priv_key="${priv_key//\"/\\\"}"
+  local escaped_short_id="${short_id//\"/\\\"}"
+  local escaped_secret_path="${secret_path//\"/\\\"}"
+  
+  # ИСПРАВЛЕНО: ИСПОЛЬЗУЕМ 'EOF' БЕЗ КАВЫЧЕК ДЛЯ РАСКРЫТИЯ ПЕРЕМЕННЫХ
+  cat > "$tmp_config" <<EOF
 {
 "log": {"loglevel": "warning"},
 "routing": {
@@ -615,11 +645,11 @@ generate_xray_config() {
 "protocol": "vless",
 "settings": {
 "decryption": "none",
-"clients": [{"id": "${uuid}", "email": "main"}]
+"clients": [{"id": "${escaped_uuid}", "email": "main"}]
 },
 "streamSettings": {
 "network": "xhttp",
-"xhttpSettings": {"path": "/${secret_path}"}
+"xhttpSettings": {"path": "/${escaped_secret_path}"}
 },
 "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"]}
 },
@@ -638,9 +668,9 @@ generate_xray_config() {
 "show": false,
 "target": "127.0.0.1:8001",
 "xver": 1,
-"serverNames": ["${DOMAIN}"],
-"privateKey": "${priv_key}",
-"shortIds": ["${short_id}"]
+"serverNames": ["${escaped_domain}"],
+"privateKey": "${escaped_priv_key}",
+"shortIds": ["${escaped_short_id}"]
 }
 }
 }
@@ -651,16 +681,26 @@ generate_xray_config() {
 ]
 }
 EOF
-  # ИСПРАВЛЕНО: права для Xray — root:root (не www-data)
+  
+  # Проверка валидности JSON
+  if ! command -v jq &>/dev/null; then
+    ensure_dependency "jq" "jq"
+  fi
+  
+  if ! jq empty "$tmp_config" &>/dev/null; then
+    print_error "Невалидный JSON в конфигурации:\n$(cat "$tmp_config")"
+  fi
+  
+  # Атомарное перемещение
+  mv "$tmp_config" "$XRAY_CONFIG" || print_error "Не удалось переместить конфиг"
   chown root:root "$XRAY_CONFIG" 2>/dev/null || true
   chmod 644 "$XRAY_CONFIG"
-  # ПРОВЕРКА СУЩЕСТВОВАНИЯ ФАЙЛА
-  if [[ ! -f "$XRAY_CONFIG" ]]; then
-    print_error "Файл конфигурации не создан: ${XRAY_CONFIG}"
-  fi
+  
+  # Проверка размера файла
   if [[ $(stat -c%s "$XRAY_CONFIG" 2>/dev/null || echo 0) -lt 100 ]]; then
     print_error "Файл конфигурации слишком мал (<100 байт):\n$(cat "$XRAY_CONFIG")"
   fi
+  
   print_info "Валидация конфигурации Xray..."
   if ! xray run -test -c "$XRAY_CONFIG" &>/dev/null; then
     xray run -test -c "$XRAY_CONFIG" 2>&1 | tee -a "$LOG_FILE"
@@ -821,7 +861,7 @@ EOF_HELP
 main() {
   echo -e "
 ${BOLD}${SOFT_BLUE}Xray VLESS/XHTTP/Reality Installer${RESET}"
-  echo -e "${LIGHT_GRAY}Официальная генерация UUID • Правильная валидация • Минималистичный${RESET}"
+  echo -e "${LIGHT_GRAY}Исправлено: генерация конфига • Экранирование переменных • Валидация JSON${RESET}"
   echo -e "${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}
 "
   check_root
@@ -846,6 +886,7 @@ ${BOLD}${SOFT_BLUE}Xray VLESS/XHTTP/Reality Installer${RESET}"
   ensure_dependency "unzip" "unzip"
   ensure_dependency "iproute2" "ss"
   ensure_dependency "openssl" "openssl"
+  ensure_dependency "haveged" "haveged"
   print_success "Все зависимости установлены"
   print_step "Маскировка"
   create_masking_site
@@ -854,7 +895,7 @@ ${BOLD}${SOFT_BLUE}Xray VLESS/XHTTP/Reality Installer${RESET}"
   configure_caddy
   print_step "Xray"
   install_xray
-  generate_xray_config
+  generate_xray_config  # <-- ИСПРАВЛЕНА ГЕНЕРАЦИЯ
   setup_auto_updates
   print_step "Утилиты"
   create_user_utility
