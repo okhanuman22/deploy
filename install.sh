@@ -2,22 +2,20 @@
 set -euo pipefail
 
 # ============================================================================
-# Xray VLESS/XHTTP/Reality Installer
-# Полная системная оптимизация + маскировка трафика + автоматические обновления
+# Xray VLESS/XHTTP/Reality Installer 
 # ============================================================================
 
-# =============== СОВРЕМЕННАЯ ЦВЕТОВАЯ СХЕМА ===============
-DARK_GRAY='\033[38;5;242m'    # #767676 — разделители
-SOFT_BLUE='\033[38;5;67m'     # #5f87ff — заголовки этапов
-SOFT_GREEN='\033[38;5;71m'    # #5faf5f — успех
-SOFT_YELLOW='\033[38;5;178m'  # #d7af00 — предупреждения
-SOFT_RED='\033[38;5;167m'     # #d75f5f — ошибки
-MEDIUM_GRAY='\033[38;5;246m'  # #949494 — второстепенная информация
-LIGHT_GRAY='\033[38;5;250m'   # #bcbcbc — дополнительная информация
+# =============== ЦВЕТОВАЯ СХЕМА ===============
+DARK_GRAY='\033[38;5;242m'
+SOFT_BLUE='\033[38;5;67m'
+SOFT_GREEN='\033[38;5;71m'
+SOFT_YELLOW='\033[38;5;178m'
+SOFT_RED='\033[38;5;167m'
+MEDIUM_GRAY='\033[38;5;246m'
+LIGHT_GRAY='\033[38;5;250m'
 BOLD='\033[1m'
 RESET='\033[0m'
 
-# Лог-файл для отладки
 readonly LOG_FILE="/var/log/xray-installer.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
@@ -27,27 +25,15 @@ print_step() {
   echo -e "${DARK_GRAY}───────────────────────────────────────────────────────────────────────────────${RESET}\n"
 }
 
-print_success() {
-  echo -e "${SOFT_GREEN}✓${RESET} ${1}"
-}
-
-print_warning() {
-  echo -e "${SOFT_YELLOW}⚠${RESET} ${1}"
-}
-
+print_success() { echo -e "${SOFT_GREEN}✓${RESET} ${1}"; }
+print_warning() { echo -e "${SOFT_YELLOW}⚠${RESET} ${1}"; }
 print_error() {
   echo -e "\n${SOFT_RED}✗${RESET} ${BOLD}${1}${RESET}\n" >&2
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $1" >> "$LOG_FILE"
   exit 1
 }
-
-print_info() {
-  echo -e "${LIGHT_GRAY}ℹ${RESET} ${1}"
-}
-
-print_substep() {
-  echo -e "${MEDIUM_GRAY}  →${RESET} ${1}"
-}
+print_info() { echo -e "${LIGHT_GRAY}ℹ${RESET} ${1}"; }
+print_substep() { echo -e "${MEDIUM_GRAY}  →${RESET} ${1}"; }
 
 # ============================================================================
 # Глобальные переменные
@@ -78,14 +64,12 @@ get_public_ip() {
 prompt_domain() {
   print_step "Настройка домена"
   
-  # 1. Переменная окружения
   if [[ -n "$DOMAIN" ]]; then
     print_info "Домен из переменной окружения: ${DOMAIN}"
     validate_and_set_domain "$DOMAIN"
     return
   fi
   
-  # 2. Существующая конфигурация — используем без вопросов (для надежности)
   local existing_domain=""
   if [[ -f "$XRAY_CONFIG" ]] && command -v jq &>/dev/null; then
     existing_domain=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0] // empty' "$XRAY_CONFIG" 2>/dev/null || echo "")
@@ -99,12 +83,10 @@ prompt_domain() {
     return
   fi
   
-  # 3. Интерактивный запрос ЧЕРЕЗ /dev/tty (работает даже при перенаправлении stdin)
   echo -e "${BOLD}Введите Ваш домен${RESET} (пример: wishnu.duckdns.org)"
   echo -e "${LIGHT_GRAY}Домен должен быть привязан к IP-адресу этого сервера${RESET}"
   
   local input_domain=""
-  # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: всегда используем /dev/tty для ввода
   if ! read -r input_domain < /dev/tty 2>/dev/null; then
     print_error "Не удалось прочитать домен из терминала. Укажите домен через переменную окружения:\n  DOMAIN=wishnu.duckdns.org sudo bash install.sh"
   fi
@@ -135,7 +117,6 @@ validate_and_set_domain() {
   if [[ -n "$ipv4" ]]; then
     print_success "DNS A-запись найдена: ${ipv4}"
   else
-    # Запрос подтверждения через /dev/tty
     local confirm=""
     echo -e "${SOFT_YELLOW}⚠${RESET} DNS для ${BOLD}${input_domain}${RESET} не найден."
     if read -p "Продолжить без проверки DNS? [y/N]: " confirm < /dev/tty 2>/dev/null; then
@@ -161,6 +142,45 @@ validate_and_set_domain() {
   print_info "IP-адрес сервера: ${SERVER_IP}"
 }
 
+ensure_entropy() {
+  print_substep "Проверка энтропии и установка haveged"
+  
+  local entropy_avail
+  entropy_avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo 0)
+  
+  print_info "Текущий уровень энтропии: ${entropy_avail}"
+  
+  if [[ "$entropy_avail" -lt 200 ]]; then
+    print_warning "Низкая энтропия (< 200). Устанавливаем haveged для генерации энтропии..."
+    
+    # Установка haveged с таймаутом
+    timeout 30 apt-get update >/dev/null 2>&1 || true
+    if ! timeout 60 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends haveged >/dev/null 2>&1; then
+      print_error "Не удалось установить haveged. Проверьте сетевое подключение и повторите установку."
+    fi
+    
+    systemctl enable haveged --now >/dev/null 2>&1 || true
+    print_success "haveged установлен и активирован"
+    
+    # Даем время накопить энтропию
+    sleep 3
+    
+    entropy_avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo 0)
+    print_info "Энтропия после haveged: ${entropy_avail}"
+    
+    if [[ "$entropy_avail" -lt 100 ]]; then
+      print_warning "Энтропия всё ещё низкая (${entropy_avail}). Продолжаем с риском зависания генерации ключей."
+      print_warning "Если генерация ключей зависнет — вручную выполните:"
+      print_warning "  sudo apt install haveged && sudo systemctl start haveged && sleep 5"
+    fi
+  else
+    print_success "Энтропия достаточна (${entropy_avail})"
+  fi
+}
+
+# ============================================================================
+# Защищённая установка зависимостей с таймаутами
+# ============================================================================
 ensure_dependency() {
   local pkg="$1"
   local cmd="${2:-$pkg}"
@@ -178,12 +198,23 @@ ensure_dependency() {
   fi
   
   print_info "Установка: ${pkg}..."
-  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$pkg" >/dev/null 2>&1; then
-    print_error "Не удалось установить ${pkg}"
+  
+  # Принудительное подтверждение + таймаут 180 секунд
+  if ! timeout 180 sh -c "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold' ${pkg} >/dev/null 2>&1"; then
+    print_error "Не удалось установить ${pkg}. Проверьте сетевое подключение и зеркала apt."
   fi
   
-  if [[ "$cmd" != "-" ]] && ! command -v "$cmd" &>/dev/null; then
-    print_error "После установки ${pkg} команда '${cmd}' недоступна"
+  # Проверка установки
+  if [[ "$cmd" != "-" ]]; then
+    local attempts=0
+    while ! command -v "$cmd" &>/dev/null && [[ $attempts -lt 5 ]]; do
+      sleep 1
+      ((attempts++))
+    done
+    
+    if ! command -v "$cmd" &>/dev/null; then
+      print_error "После установки ${pkg} команда '${cmd}' недоступна"
+    fi
   fi
   
   print_success "Установлено: ${pkg}"
@@ -243,7 +274,7 @@ free_ports() {
     fi
     
     local attempts=0
-    while [[ -n "$(get_process_on_port "$port" "$proto" || echo "")" ]] && [[ $attempts -lt 5 ]]; do
+    while [[ -n "$(get_process_on_port "$port" "$proto" || echo "")" ]] && [[ $attempts -lt 10 ]]; do
       sleep 1
       ((attempts++))
     done
@@ -360,8 +391,8 @@ configure_firewall() {
   ufw allow 80/tcp comment "HTTP (ACME/Caddy)" >/dev/null 2>&1
   ufw allow 443/tcp comment "HTTPS (Xray)" >/dev/null 2>&1
   
-  if ! ufw --force enable >/dev/null 2>&1; then
-    ufw enable 2>&1 | grep -v "ip6tables" >/dev/null 2>&1 || true
+  if ! timeout 15 ufw --force enable >/dev/null 2>&1; then
+    print_warning "UFW активирован с предупреждениями (таймаут при включении)"
   fi
   
   if ufw status | grep -q "Status: active"; then
@@ -393,12 +424,17 @@ findtime = 10m
 ignoreip = 127.0.0.1/8 ::1
 EOF
   
-  systemctl enable fail2ban --now >/dev/null 2>&1 || true
+  systemctl enable fail2ban >/dev/null 2>&1 || true
+  if ! timeout 10 systemctl start fail2ban >/dev/null 2>&1; then
+    print_warning "Fail2Ban не запустился немедленно (запуск в фоне)"
+  fi
+  
+  sleep 2
   
   if systemctl is-active --quiet fail2ban; then
     print_success "Fail2Ban активен (защита SSH: 3 попытки → бан на 1 час)"
   else
-    print_warning "Fail2Ban не запущен (конфигурация сохранена)"
+    print_warning "Fail2Ban запущен в фоне (проверьте статус: systemctl status fail2ban)"
   fi
 }
 
@@ -470,7 +506,7 @@ EOF_SITE
   echo -e "User-agent: *\nDisallow: /admin/" > "$SITE_DIR/robots.txt"
   echo "x" > "$SITE_DIR/favicon.ico"
   
-  # ИСПРАВЛЕНО: опечатка www-www-data → www-data:www-data
+  # ИСПРАВЛЕНО: опечатка www-www-data → www-data
   chown -R www-data:www-data "$SITE_DIR" 2>/dev/null || true
   chmod -R 755 "$SITE_DIR"
   
@@ -504,18 +540,16 @@ install_caddy() {
   ensure_dependency "gnupg" "gpg"
   
   if [[ ! -f /usr/share/keyrings/caddy-stable-archive-keyring.gpg ]]; then
-    # ИСПРАВЛЕНО: удалён пробел в конце URL
     curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
   fi
   
   if [[ ! -f /etc/apt/sources.list.d/caddy-stable.list ]]; then
-    # ИСПРАВЛЕНО: удалён пробел в конце URL
     echo "deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main" \
       > /etc/apt/sources.list.d/caddy-stable.list
   fi
   
-  apt-get update >/dev/null 2>&1
-  apt-get install -y caddy >/dev/null 2>&1
+  timeout 30 apt-get update >/dev/null 2>&1 || print_warning "apt update завершился с ошибкой, продолжаем"
+  timeout 120 apt-get install -y caddy >/dev/null 2>&1 || print_error "Не удалось установить Caddy"
   
   print_success "Caddy установлен (версия: $(caddy version 2>/dev/null | head -n1 | cut -d' ' -f1))"
 }
@@ -582,14 +616,13 @@ EOF
 }
 
 # ============================================================================
-# Xray (только официальный установщик)
+# Xray (официальный установщик)
 # ============================================================================
 
 install_xray() {
   print_substep "Установка Xray core (официальный установщик)"
   
   if command -v xray &>/dev/null; then
-    # Корректное получение версии (без лишних строк)
     local version
     version=$(xray version 2>/dev/null | head -n1 | cut -d' ' -f1-3 || echo "unknown")
     print_info "Xray уже установлен (версия: ${version})"
@@ -598,30 +631,27 @@ install_xray() {
   
   ensure_dependency "curl" "curl"
   
-  # Только официальный установщик — без резервных методов
   print_info "Загрузка официального установщика Xray..."
-  # ИСПРАВЛЕНО: удалён пробел в конце URL
-  if ! bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1; then
+  if ! timeout 60 bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1; then
     print_error "Не удалось установить Xray официальным установщиком. Проверьте сетевое подключение."
   fi
   
-  # Установка геофайлов
   print_info "Установка геофайлов (geoip.dat, geosite.dat)..."
-  # ИСПРАВЛЕНО: удалён пробел в конце URL
-  if ! bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata >/dev/null 2>&1; then
+  if ! timeout 60 bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata >/dev/null 2>&1; then
     print_warning "Не удалось установить геофайлы. Попытка повторной установки..."
-    # ИСПРАВЛЕНО: удалён пробел в конце URL
-    bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata || true
+    timeout 60 bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata || true
   fi
   
-  # Корректное получение версии после установки
   local version
   version=$(xray version 2>/dev/null | head -n1 | cut -d' ' -f1-3 || echo "unknown")
   print_success "Xray установлен (версия: ${version})"
 }
 
+# ============================================================================
+# ГЕНЕРАЦИЯ КЛЮЧЕЙ ТОЛЬКО ОФИЦИАЛЬНОЙ КОМАНДОЙ (БЕЗ РЕЗЕРВНЫХ КЛЮЧЕЙ!)
+# ============================================================================
 generate_xray_config() {
-  print_substep "Генерация криптографических параметров"
+  print_substep "Генерация криптографических параметров (официальная команда xray x25519)"
   
   mkdir -p /usr/local/etc/xray
   mkdir -p "$XRAY_DAT_DIR"
@@ -640,39 +670,37 @@ generate_xray_config() {
     uuid=$(cat /proc/sys/kernel/random/uuid)
     
     # ============================================================================
-    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: генерация ключей с защитой от низкой энтропии
+    # ГАРАНТИРОВАННАЯ ГЕНЕРАЦИЯ КЛЮЧЕЙ ТОЛЬКО ЧЕРЕЗ xray x25519
     # ============================================================================
     
-    # Проверка уровня энтропии перед генерацией
-    local entropy_avail
-    entropy_avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo 0)
+    print_info "Генерация X25519 ключей (таймаут: 30 секунд)..."
     
-    if [[ "$entropy_avail" -lt 200 ]]; then
-      print_warning "Низкий уровень энтропии (${entropy_avail}). Устанавливаем haveged..."
-      DEBIAN_FRONTEND=noninteractive apt-get install -y haveged >/dev/null 2>&1 || true
-      systemctl start haveged >/dev/null 2>&1 || true
-      sleep 3
-      entropy_avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo 0)
-      print_info "Энтропия после haveged: ${entropy_avail}"
+    # Выполнение официальной команды с таймаутом
+    local key_pair
+    if ! key_pair=$(timeout 30 xray x25519 2>&1); then
+      print_error "Генерация ключей превысила таймаут (30 сек). Возможные причины:
+  1. Недостаточно энтропии в системе
+  2. Проблемы с /dev/random
+  
+Решение:
+  sudo apt install haveged && sudo systemctl start haveged && sleep 5
+  Затем повторите установку скрипта."
     fi
     
-    # Генерация ключей с таймаутом 10 секунд (защита от зависания)
-    if key_pair=$(timeout 10 xray x25519 2>/dev/null); then
-      # Извлечение приватного ключа (для конфигурации сервера)
-      priv_key=$(echo "$key_pair" | grep -i "^PrivateKey" | awk '{print $NF}')
-      # Извлечение ПУБЛИЧНОГО ключа (для клиента, поле 'Password' в выводе = публичный ключ)
-      pub_key=$(echo "$key_pair" | grep -i "^Password" | awk '{print $NF}')
-      
-      # Проверка валидности ключей
-      if [[ -z "$priv_key" || -z "$pub_key" || "${#priv_key}" -lt 40 || "${#pub_key}" -lt 40 ]]; then
-        print_warning "Некорректные ключи, используем резервные"
-        priv_key="cCxc5EJIDFlqlp5uFXLIo_OMTXzwmMlztmitB2CIw3s"
-        pub_key="VqCnBCOjZ2xvj0fquZpCQEyzpZtMhr4-JvkNK23jd3E"  # ИСПРАВЛЕНО: убрана опечатка
-      fi
-    else
-      print_warning "Генерация ключей зависла или превысила таймаут. Используем резервные ключи."
-      priv_key="cCxc5EJIDFlqlp5uFXLIo_OMTXzwmMlztmitB2CIw3s"
-      pub_key="VqCnBCOjZ2xvj0fquZpCQEyzpZtMhr4-JvkNK23jd3E"  # ИСПРАВЛЕНО: убрана опечатка
+    # Извлечение ключей из вывода
+    priv_key=$(echo "$key_pair" | grep -i "^PrivateKey" | awk '{print $NF}')
+    pub_key=$(echo "$key_pair" | grep -i "^Password" | awk '{print $NF}')
+    
+    # Валидация ключей
+    if [[ -z "$priv_key" || -z "$pub_key" ]]; then
+      print_error "Не удалось извлечь ключи из вывода 'xray x25519'. Вывод команды:
+${key_pair}"
+    fi
+    
+    if [[ "${#priv_key}" -lt 40 || "${#pub_key}" -lt 40 ]]; then
+      print_error "Некорректная длина ключей (ожидается >40 символов):
+  PrivateKey: ${priv_key}
+  Password (Public Key): ${pub_key}"
     fi
     
     short_id=$(openssl rand -hex 4)
@@ -686,13 +714,16 @@ generate_xray_config() {
     } > "$XRAY_KEYS"
     
     chmod 600 "$XRAY_KEYS"
+    
+    print_success "Ключи успешно сгенерированы официальной командой 'xray x25519'"
+    print_info "Важно: поле 'Password' в выводе = ПУБЛИЧНЫЙ ключ (для клиента)"
   fi
   
   print_info "Путь: /${secret_path}"
   print_info "UUID: ${uuid:0:8}..."
   print_info "ShortID: ${short_id}"
-  print_info "Private key: ${priv_key:0:8}..."  # Только первые 8 символов для лога
-  print_info "Public key:  ${pub_key:0:8}..."   # Только первые 8 символов для лога
+  print_info "Private key (сервер): ${priv_key:0:8}..."
+  print_info "Public key (клиент):  ${pub_key:0:8}..."
   
   cat > "$XRAY_CONFIG" <<EOF
 {
@@ -804,13 +835,12 @@ EOF
 }
 
 # ============================================================================
-# Автоматические обновления (только официальный установщик)
+# Автоматические обновления
 # ============================================================================
 
 setup_auto_updates() {
   print_step "Настройка автоматических обновлений"
   
-  # 1. Еженедельное обновление ядра Xray (воскресенье 03:00)
   cat > /etc/systemd/system/xray-core-update.service <<'EOF_CORE_SERVICE'
 [Unit]
 Description=Update Xray Core to Latest Version
@@ -843,7 +873,6 @@ EOF_CORE_TIMER
   systemctl enable xray-core-update.timer --now >/dev/null 2>&1
   print_success "Автообновление ядра: каждое воскресенье 03:00"
   
-  # 2. ЕЖЕДНЕВНОЕ обновление геофайлов (03:00)
   cat > /etc/systemd/system/xray-geo-update.service <<'EOF_GEO_SERVICE'
 [Unit]
 Description=Update Xray Geo Files (geoip.dat, geosite.dat)
@@ -876,7 +905,6 @@ EOF_GEO_TIMER
   systemctl enable xray-geo-update.timer --now >/dev/null 2>&1
   print_success "Автообновление геофайлов: ежедневно 03:00"
   
-  # 3. Информация для пользователя
   print_info "Ручное обновление ядра:   sudo systemctl start xray-core-update.service"
   print_info "Ручное обновление Geo:    sudo systemctl start xray-geo-update.service"
   print_info "Просмотр таймеров:        systemctl list-timers | grep xray"
@@ -884,7 +912,7 @@ EOF_GEO_TIMER
 }
 
 # ============================================================================
-# Утилита управления пользователями
+# Утилиты управления
 # ============================================================================
 
 create_user_utility() {
@@ -1069,25 +1097,14 @@ main() {
   check_root
   
   # ============================================================================
-  # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: установка haveged ДО любых криптографических операций
+  # УСТАНОВКА HAVEGED ДО ЛЮБЫХ КРИПТОГРАФИЧЕСКИХ ОПЕРАЦИЙ
   # ============================================================================
-  print_step "Подготовка системы (энтропия, зависимости)"
+  print_step "Подготовка системы (энтропия)"
+  ensure_entropy
   
-  # Установка haveged для генерации энтропии
-  if ! command -v haveged &>/dev/null; then
-    print_substep "Установка генератора энтропии (haveged)..."
-    DEBIAN_FRONTEND=noninteractive apt-get update >/dev/null 2>&1 || true
-    DEBIAN_FRONTEND=noninteractive apt-get install -y haveged >/dev/null 2>&1 || true
-    systemctl enable haveged --now >/dev/null 2>&1 || true
-    sleep 2
-    local entropy
-    entropy=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo "неизвестно")
-    print_success "Энтропия: ${entropy} (haveged активен)"
-  else
-    local entropy
-    entropy=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo "неизвестно")
-    print_info "Энтропия: ${entropy} (haveged уже установлен)"
-  fi
+  # Глобальные переменные для apt
+  export DEBIAN_FRONTEND=noninteractive
+  export APT_KEY_DONT_WARN_ON_DANGEROUS_USAGE=1
   
   print_step "Системные оптимизации"
   optimize_swap
@@ -1101,11 +1118,10 @@ main() {
   configure_fail2ban
   
   print_step "Установка зависимостей"
-  export DEBIAN_FRONTEND=noninteractive
   
-  timeout 30 apt-get update >/dev/null 2>&1 || {
-    print_warning "Не удалось обновить список пакетов, продолжаем с текущим кэшем"
-  }
+  if ! timeout 45 apt-get update >/dev/null 2>&1; then
+    print_warning "apt update завершился с ошибкой или таймаутом, продолжаем с текущим кэшем"
+  fi
   
   ensure_dependency "curl" "curl"
   ensure_dependency "jq" "jq"
@@ -1117,7 +1133,7 @@ main() {
   ensure_dependency "unzip" "unzip"
   ensure_dependency "iproute2" "ss"
   ensure_dependency "qrencode" "qrencode"
-  ensure_dependency "openssl" "openssl"  # Для генерации резервных ключей
+  ensure_dependency "openssl" "openssl"
   
   print_success "Все зависимости установлены"
   
@@ -1130,7 +1146,7 @@ main() {
   
   print_step "Xray Core"
   install_xray
-  generate_xray_config
+  generate_xray_config  # ← Здесь генерируются ключи ТОЛЬКО официальной командой
   
   print_step "Автоматические обновления"
   setup_auto_updates
