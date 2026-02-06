@@ -11,8 +11,15 @@
 ```
 
 ### 🚀 Как использовать:
+
+- Способ 1: Интерактивный (рекомендуется)
 ```bash
-curl -fsSL https://raw.githubusercontent.com/okhanuman22/deploy/main/install.sh | sudo -E bash
+curl -fsSL https://raw.githubusercontent.com/okhanuman22/deploy/main/install.sh -o install.sh
+sudo bash install.sh
+```
+- Способ 2: Неинтерактивный (для автоматизации)
+```bash
+DOMAIN=ВАШДОМЕН.OH curl -fsSL https://raw.githubusercontent.com/okhanuman22/deploy/main/install.sh | sudo bash
 ```
 
 ### 👥 Управление пользователями:
