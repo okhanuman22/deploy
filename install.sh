@@ -75,10 +75,6 @@ get_public_ip() {
   curl -4s https://icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}' | cut -d' ' -f1
 }
 
-is_interactive() {
-  [[ -t 0 && -t 1 ]]
-}
-
 prompt_domain() {
   print_step "Настройка домена"
   
@@ -89,63 +85,41 @@ prompt_domain() {
     return
   fi
   
-  # 2. Существующая конфигурация
+  # 2. Существующая конфигурация — используем без вопросов (для надежности)
   local existing_domain=""
   if [[ -f "$XRAY_CONFIG" ]] && command -v jq &>/dev/null; then
     existing_domain=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0] // empty' "$XRAY_CONFIG" 2>/dev/null || echo "")
   fi
   
   if [[ -n "$existing_domain" && "$existing_domain" != "null" ]]; then
-    if is_interactive; then
-      local use_existing
-      read -p "$(echo -e "${LIGHT_GRAY}ℹ${RESET} Обнаружен домен: ${BOLD}${existing_domain}${RESET}\nИспользовать его? [Y/n]: ")" use_existing < /dev/tty 2>/dev/null || use_existing="Y"
-      case "${use_existing:-Y}" in
-        [Yy]*|"") 
-          DOMAIN="$existing_domain"
-          print_success "Домен: ${DOMAIN}"
-          SERVER_IP=$(get_public_ip)
-          print_info "IP-адрес сервера: ${SERVER_IP}"
-          return 
-          ;;
-        *) ;;
-      esac
-    else
-      DOMAIN="$existing_domain"
-      print_info "Используется домен из конфигурации: ${DOMAIN}"
-      SERVER_IP=$(get_public_ip)
-      print_info "IP-адрес сервера: ${SERVER_IP}"
-      return
-    fi
+    DOMAIN="$existing_domain"
+    print_info "Используется домен из конфигурации: ${DOMAIN}"
+    SERVER_IP=$(get_public_ip)
+    print_info "IP-адрес сервера: ${SERVER_IP}"
+    return
   fi
   
-  # 3. Интерактивный запрос
-  if is_interactive; then
-    echo -e "${BOLD}Введите Ваш домен${RESET} (пример: wishnu.duckdns.org)"
-    echo -e "${LIGHT_GRAY}Домен должен быть привязан к IP-адресу этого сервера${RESET}"
-    
-    while true; do
-      local input_domain
-      read -p "> " input_domain < /dev/tty 2>/dev/null || {
-        print_error "Ошибка: требуется терминал. Для автоматической установки укажите домен через переменную окружения:\n  DOMAIN=ваш.домен sudo bash install.sh"
-      }
-      input_domain=$(echo "$input_domain" | tr -d '[:space:]')
-      
-      if [[ -z "$input_domain" ]]; then
-        print_warning "Домен не может быть пустым"
-        continue
-      fi
-      
-      if [[ ! "$input_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
-        print_warning "Неверный формат домена (пример: ваш-домен.duckdns.org)"
-        continue
-      fi
-      
-      validate_and_set_domain "$input_domain"
-      break
-    done
-  else
-    print_error "Домен не указан. Укажите через переменную окружения:\n  DOMAIN=wishnu.duckdns.org sudo bash install.sh\n\nИли запустите интерактивно:\n  sudo bash install.sh"
+  # 3. Интерактивный запрос ЧЕРЕЗ /dev/tty (работает даже при перенаправлении stdin)
+  echo -e "${BOLD}Введите Ваш домен${RESET} (пример: wishnu.duckdns.org)"
+  echo -e "${LIGHT_GRAY}Домен должен быть привязан к IP-адресу этого сервера${RESET}"
+  
+  local input_domain=""
+  # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: всегда используем /dev/tty для ввода
+  if ! read -r input_domain < /dev/tty 2>/dev/null; then
+    print_error "Не удалось прочитать домен из терминала. Укажите домен через переменную окружения:\n  DOMAIN=wishnu.duckdns.org sudo bash install.sh"
   fi
+  
+  input_domain=$(echo "$input_domain" | tr -d '[:space:]')
+  
+  if [[ -z "$input_domain" ]]; then
+    print_error "Домен не может быть пустым"
+  fi
+  
+  if [[ ! "$input_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
+    print_error "Неверный формат домена (пример: ваш-домен.duckdns.org)"
+  fi
+  
+  validate_and_set_domain "$input_domain"
 }
 
 validate_and_set_domain() {
@@ -161,8 +135,10 @@ validate_and_set_domain() {
   if [[ -n "$ipv4" ]]; then
     print_success "DNS A-запись найдена: ${ipv4}"
   else
-    if is_interactive; then
-      read -p "$(echo -e "${SOFT_YELLOW}⚠${RESET} DNS для ${BOLD}${input_domain}${RESET} не найден.\nПродолжить без проверки DNS? [y/N]: ")" confirm < /dev/tty 2>/dev/null || confirm="N"
+    # Запрос подтверждения через /dev/tty
+    local confirm=""
+    echo -e "${SOFT_YELLOW}⚠${RESET} DNS для ${BOLD}${input_domain}${RESET} не найден."
+    if read -p "Продолжить без проверки DNS? [y/N]: " confirm < /dev/tty 2>/dev/null; then
       [[ ! "$confirm" =~ ^[Yy]$ ]] && print_error "Установка прервана"
     else
       print_warning "DNS не найден (продолжаем без проверки)"
@@ -171,8 +147,9 @@ validate_and_set_domain() {
   
   SERVER_IP=$(get_public_ip)
   if [[ -n "$ipv4" && "$ipv4" != "$SERVER_IP" ]]; then
-    if is_interactive; then
-      read -p "$(echo -e "${SOFT_YELLOW}⚠${RESET} DNS (${ipv4}) ≠ IP сервера (${SERVER_IP}).\nПродолжить? [y/N]: ")" confirm < /dev/tty 2>/dev/null || confirm="N"
+    local confirm=""
+    echo -e "${SOFT_YELLOW}⚠${RESET} DNS (${ipv4}) ≠ IP сервера (${SERVER_IP})."
+    if read -p "Продолжить с несоответствующим DNS? [y/N]: " confirm < /dev/tty 2>/dev/null; then
       [[ ! "$confirm" =~ ^[Yy]$ ]] && print_error "Установка прервана"
     else
       print_warning "DNS не соответствует IP сервера (продолжаем)"
