@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 # ============================================================================
-# Xray VLESS/XHTTP/Reality Installer (v2.4 — исправлена генерация конфига)
+# Xray VLESS/XHTTP/Reality Installer (v2.7 — исправлен запуск Caddy)
 # ============================================================================
 DARK_GRAY='\033[38;5;242m'
 SOFT_BLUE='\033[38;5;67m'
@@ -25,12 +25,7 @@ DOMAIN="${DOMAIN:-}"
 SERVER_IP=""
 REBOOT_REQUIRED=0
 
-# ============================================================================
-# ЛОГИРОВАНИЕ БЕЗ ПОТЕРИ ИНТЕРАКТИВНОСТИ
-# ============================================================================
-log() {
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE" 2>/dev/null || true
-}
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE" 2>/dev/null || true; }
 
 print_step() {
   echo -e "
@@ -41,16 +36,8 @@ ${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━�
   log "STEP: $1"
 }
 
-print_success() { 
-  echo -e "${SOFT_GREEN}✓${RESET} ${1}"
-  log "SUCCESS: $1"
-}
-
-print_warning() { 
-  echo -e "${SOFT_YELLOW}⚠${RESET} ${1}"
-  log "WARNING: $1"
-}
-
+print_success() { echo -e "${SOFT_GREEN}✓${RESET} ${1}"; log "SUCCESS: $1"; }
+print_warning() { echo -e "${SOFT_YELLOW}⚠${RESET} ${1}"; log "WARNING: $1"; }
 print_error() {
   echo -e "
 ${SOFT_RED}✗${RESET} ${BOLD}${1}${RESET}
@@ -58,48 +45,23 @@ ${SOFT_RED}✗${RESET} ${BOLD}${1}${RESET}
   log "ERROR: $1"
   exit 1
 }
+print_info() { echo -e "${LIGHT_GRAY}ℹ${RESET} ${1}"; log "INFO: $1"; }
+print_substep() { echo -e "${MEDIUM_GRAY}  →${RESET} ${1}"; log "SUBSTEP: $1"; }
+print_debug() { echo -e "${MEDIUM_GRAY}[DEBUG]${RESET} ${1}"; log "DEBUG: $1"; }
 
-print_info() { 
-  echo -e "${LIGHT_GRAY}ℹ${RESET} ${1}"
-  log "INFO: $1"
-}
-
-print_substep() { 
-  echo -e "${MEDIUM_GRAY}  →${RESET} ${1}"
-  log "SUBSTEP: $1"
-}
-
-print_debug() {
-  echo -e "${MEDIUM_GRAY}[DEBUG]${RESET} ${1}"
-  log "DEBUG: $1"
-}
-
-# ============================================================================
-# ИНТЕРАКТИВНЫЙ СПИННЕР (работает при любом выводе)
-# ============================================================================
 run_with_spinner() {
-  local cmd="$1"
-  local label="${2:-Выполнение}"
-  local pid output_file="/tmp/spinner_out_$$"
-  
-  local tty="/dev/tty"
-  [[ -t 1 ]] && tty="/dev/stdout"
-  
+  local cmd="$1" label="${2:-Выполнение}" pid output_file="/tmp/spinner_out_$$"
+  local tty="/dev/tty"; [[ -t 1 ]] && tty="/dev/stdout"
   touch "$output_file" 2>/dev/null || true
   bash -c "$cmd" &> "$output_file" &
   pid=$!
-  
-  local spinners=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
-  local i=0
+  local spinners=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏') i=0
   while kill -0 "$pid" 2>/dev/null; do
     printf "\r${LIGHT_GRAY}${label} ${spinners[$i]}${RESET}" > "$tty" 2>/dev/null || break
-    i=$(( (i + 1) % ${#spinners[@]} ))
-    sleep 0.1
+    i=$(( (i + 1) % ${#spinners[@]} )); sleep 0.1
   done
-  wait "$pid" 2>/dev/null
-  local exit_code=$?
+  wait "$pid" 2>/dev/null; local exit_code=$?
   printf "\r\033[K" > "$tty" 2>/dev/null || true
-  
   if [[ $exit_code -eq 0 ]]; then
     echo -e "${SOFT_GREEN}✓${RESET} ${label}" > "$tty" 2>/dev/null || true
     rm -f "$output_file" 2>/dev/null || true
@@ -107,8 +69,7 @@ run_with_spinner() {
   else
     echo -e "${SOFT_RED}✗${RESET} ${label}" > "$tty" 2>/dev/null || true
     if [[ -s "$output_file" ]]; then
-      echo -e "
-${SOFT_RED}Детали:${RESET}" > "$tty" 2>/dev/null || true
+      echo -e "${SOFT_RED}Детали:${RESET}" > "$tty" 2>/dev/null || true
       tail -n 10 "$output_file" | sed "s/^/  ${MEDIUM_GRAY}│${RESET} /" > "$tty" 2>/dev/null || true
       echo "" > "$tty" 2>/dev/null || true
     fi
@@ -117,87 +78,49 @@ ${SOFT_RED}Детали:${RESET}" > "$tty" 2>/dev/null || true
   fi
 }
 
-# ============================================================================
-# ИДЕМПОТЕНТНАЯ УСТАНОВКА ЗАВИСИМОСТЕЙ
-# ============================================================================
 ensure_dependency() {
-  local pkg="$1"
-  local cmd="${2:-$pkg}"
-  
+  local pkg="$1" cmd="${2:-$pkg}"
   if [[ "$cmd" == "-" ]]; then
     dpkg -l | grep -q "^ii.* $pkg " 2>/dev/null && { print_info "✓ ${pkg}"; return 0; }
   else
     command -v "$cmd" &>/dev/null && { print_info "✓ ${pkg}"; return 0; }
   fi
-  
   DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends "$pkg" &>/dev/null || \
     print_error "Не удалось установить ${pkg}"
-  
   [[ "$cmd" != "-" ]] && ! command -v "$cmd" &>/dev/null && \
     print_error "Команда '${cmd}' недоступна после установки ${pkg}"
-  
   print_success "${pkg}"
 }
 
-# ============================================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# ============================================================================
-check_root() {
-  [[ "$EUID" -eq 0 ]] || print_error "Запускайте от root (sudo)"
-}
+check_root() { [[ "$EUID" -eq 0 ]] || print_error "Запускайте от root (sudo)"; }
+get_public_ip() { curl -4s https://icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}' | cut -d' ' -f1; }
 
-get_public_ip() {
-  curl -4s https://icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}' | cut -d' ' -f1
-}
-
-# ============================================================================
-# ОБНОВЛЕНИЕ СИСТЕМЫ (без остановки при перезагрузке)
-# ============================================================================
 update_system() {
   print_step "Обновление системы"
-  
   run_with_spinner "apt-get update -qq" "Обновление списка пакетов" || \
     print_error "Не удалось обновить список пакетов"
-  
   run_with_spinner "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold'" "Установка обновлений" || \
     print_warning "Обновление завершилось с предупреждениями"
-  
-  if [[ -f /var/run/reboot-required ]]; then
-    REBOOT_REQUIRED=1
-    print_warning "Требуется перезагрузка после обновления ядра"
-    print_info "Установка продолжится. Перезагрузите сервер после завершения."
-  fi
-  
+  [[ -f /var/run/reboot-required ]] && { REBOOT_REQUIRED=1; print_warning "Требуется перезагрузка после обновления ядра"; }
   print_success "Система обновлена"
 }
 
-# ============================================================================
-# СИСТЕМНЫЕ ОПТИМИЗАЦИИ
-# ============================================================================
 optimize_swap() {
   print_substep "Swap"
   swapon --show | grep -q . && { print_info "✓ Уже настроен"; return 0; }
-  
-  local total_mem
-  total_mem=$(free -m | awk '/^Mem:/ {print $2}')
-  local swap_size_gb=0.5
-  
+  local total_mem=$(free -m | awk '/^Mem:/ {print $2}') swap_size_gb=0.5
   [[ "$total_mem" -le 1024 ]] && swap_size_gb=2
   [[ "$total_mem" -le 2048 && "$total_mem" -gt 1024 ]] && swap_size_gb=1
   [[ "$total_mem" -le 4096 && "$total_mem" -gt 2048 ]] && swap_size_gb=0.5
-  
   if [[ ! -f /swapfile ]]; then
     local bs count
     [[ "$swap_size_gb" == "0.5" ]] && { bs="512M"; count=1; } || { bs="1G"; count="$swap_size_gb"; }
     dd if=/dev/zero of=/swapfile bs=$bs count=$count status=none &>/dev/null
-    chmod 600 /swapfile
-    mkswap /swapfile &>/dev/null
-    swapon /swapfile &>/dev/null
+    chmod 600 /swapfile; mkswap /swapfile &>/dev/null; swapon /swapfile &>/dev/null
     grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
   else
     swapon /swapfile &>/dev/null || true
   fi
-  
   print_success "Swap активен"
 }
 
@@ -205,7 +128,6 @@ optimize_network() {
   print_substep "Сеть (BBR)"
   [[ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '')" == "bbr" ]] && \
     { print_info "✓ Уже включён"; return 0; }
-  
   cat > /etc/sysctl.d/99-xray-tuning.conf <<EOF
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
@@ -230,69 +152,49 @@ net.ipv4.icmp_echo_ignore_broadcasts=1
 net.ipv4.conf.all.accept_redirects=0
 net.ipv4.conf.default.accept_redirects=0
 EOF
-  
   sysctl -p /etc/sysctl.d/99-xray-tuning.conf &>/dev/null || \
     print_error "Не удалось применить сетевые настройки"
-  
   print_success "BBR активен"
 }
 
 configure_trim() {
   print_substep "TRIM (SSD)"
   command -v lsblk &>/dev/null || { print_info "lsblk недоступен"; return 0; }
-  
-  local trim_supported
-  trim_supported=$(lsblk --discard -no DISC-GRAN 2>/dev/null | awk '$1 != "0B" && $1 != "" {count++} END {print count+0}' || echo 0)
+  local trim_supported=$(lsblk --discard -no DISC-GRAN 2>/dev/null | awk '$1 != "0B" && $1 != "" {count++} END {print count+0}' || echo 0)
   [[ "$trim_supported" -eq 0 ]] && { print_info "Не поддерживается"; return 0; }
-  
   systemctl is-active --quiet fstrim.timer 2>/dev/null && \
     { print_info "✓ Активен (${trim_supported} диск(а))"; return 0; }
-  
   systemctl enable fstrim.timer --now &>/dev/null || \
     print_warning "Не удалось активировать TRIM"
-  
   print_success "TRIM активирован"
 }
 
-# ============================================================================
-# БЕЗОПАСНОСТЬ
-# ============================================================================
 configure_firewall() {
   print_substep "Фаервол (UFW)"
   ! command -v ufw &>/dev/null && ensure_dependency "ufw" "ufw"
-  
   ! ip6tables -L &>/dev/null 2>&1 && grep -q '^IPV6=yes' /etc/default/ufw 2>/dev/null && \
     sed -i 's/^IPV6=yes/IPV6=no/' /etc/default/ufw 2>/dev/null
-  
-  local status_output
-  status_output=$(ufw status verbose 2>/dev/null | grep -v "^Status:" | grep -v "^Logging" | grep -v "^Default" || echo "")
+  local status_output=$(ufw status verbose 2>/dev/null | grep -v "^Status:" | grep -v "^Logging" | grep -v "^Default" || echo "")
   local has_22=0 has_80=0 has_443=0
-  
   [[ "$status_output" == *"22/tcp"* ]] && has_22=1
   [[ "$status_output" == *"80/tcp"* ]] && has_80=1
   [[ "$status_output" == *"443/tcp"* ]] && has_443=1
-  
   if ufw status | grep -q "Status: active" && [[ $has_22 -eq 1 && $has_80 -eq 1 && $has_443 -eq 1 ]]; then
-    print_info "✓ Активен (22/80/443 открыты)"
-    return 0
+    print_info "✓ Активен (22/80/443 открыты)"; return 0
   fi
-  
   ufw default deny incoming &>/dev/null || true
   ufw default allow outgoing &>/dev/null || true
   ufw allow 22/tcp comment "SSH" &>/dev/null || true
   ufw allow 80/tcp comment "HTTP" &>/dev/null || true
   ufw allow 443/tcp comment "HTTPS" &>/dev/null || true
   ! ufw status | grep -q "Status: active" && ufw --force enable &>/dev/null
-  
   print_success "UFW активен"
 }
 
 configure_fail2ban() {
   print_substep "Fail2Ban"
   ! command -v fail2ban-client &>/dev/null && ensure_dependency "fail2ban" "fail2ban-client"
-  
   systemctl is-active --quiet fail2ban 2>/dev/null && { print_info "✓ Уже активен"; return 0; }
-  
   [[ ! -f /etc/fail2ban/jail.local ]] && cat > /etc/fail2ban/jail.local <<EOF
 [sshd]
 enabled = true
@@ -304,30 +206,21 @@ bantime = 1h
 findtime = 10m
 ignoreip = 127.0.0.1/8 ::1
 EOF
-  
   systemctl enable fail2ban &>/dev/null || true
   systemctl start fail2ban &>/dev/null || true
   sleep 1
-  
   systemctl is-active --quiet fail2ban && print_success "Fail2Ban активен" || \
     print_warning "Fail2Ban запущен в фоне"
 }
 
-# ============================================================================
-# НАСТРОЙКА ДОМЕНА
-# ============================================================================
 prompt_domain() {
   print_step "Домен"
-  
   if [[ -n "$DOMAIN" ]]; then
     validate_and_set_domain "$DOMAIN"
     return
   fi
-  
   if [[ -f "$XRAY_CONFIG" ]] && command -v jq &>/dev/null; then
-    local existing_domain
-    # Используем .inbounds[1] для двух-inbound структуры (как в оригинальном скрипте)
-    existing_domain=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0] // ""' "$XRAY_CONFIG" 2>/dev/null || echo "")
+    local existing_domain=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0] // ""' "$XRAY_CONFIG" 2>/dev/null || echo "")
     if [[ -n "$existing_domain" && "$existing_domain" != "null" && "$existing_domain" != "example.com" && "$existing_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
       DOMAIN="$existing_domain"
       SERVER_IP=$(get_public_ip)
@@ -335,37 +228,24 @@ prompt_domain() {
       return
     fi
   fi
-  
   echo -e "${BOLD}Введите домен${RESET} (пример: ваш-домен.duckdns.org)"
   echo -e "${LIGHT_GRAY}Домен должен быть привязан к IP-адресу этого сервера${RESET}"
-  
   local input_domain=""
   if ! read -r input_domain < /dev/tty 2>/dev/null; then
     print_error "Не удалось прочитать домен из терминала"
   fi
-  
   input_domain=$(echo "$input_domain" | tr -d '[:space:]')
-  if [[ -z "$input_domain" ]]; then
-    print_error "Домен не может быть пустым"
-  fi
-  
-  if [[ ! "$input_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
+  [[ -z "$input_domain" ]] && print_error "Домен не может быть пустым"
+  [[ ! "$input_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]] && \
     print_error "Неверный формат домена (пример: ваш-домен.duckdns.org)"
-  fi
-  
   validate_and_set_domain "$input_domain"
 }
 
 validate_and_set_domain() {
   local input_domain="$1"
-  
-  if [[ ! "$input_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
+  [[ ! "$input_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]] && \
     print_error "Неверный формат домена: ${input_domain}"
-  fi
-  
-  local ipv4
-  ipv4=$(host -t A "$input_domain" 2>/dev/null | awk '/has address/ {print $4; exit}' || echo "")
-  
+  local ipv4=$(host -t A "$input_domain" 2>/dev/null | awk '/has address/ {print $4; exit}' || echo "")
   if [[ -n "$ipv4" ]]; then
     print_success "DNS A-запись найдена: ${ipv4}"
   else
@@ -377,9 +257,7 @@ validate_and_set_domain() {
       print_warning "DNS не найден (продолжаем без проверки)"
     fi
   fi
-  
   SERVER_IP=$(get_public_ip)
-  
   if [[ -n "$ipv4" && "$ipv4" != "$SERVER_IP" ]]; then
     local confirm=""
     echo -e "${SOFT_YELLOW}⚠${RESET} DNS (${ipv4}) ≠ IP сервера (${SERVER_IP})."
@@ -389,19 +267,14 @@ validate_and_set_domain() {
       print_warning "DNS не соответствует IP сервера (продолжаем)"
     fi
   fi
-  
   DOMAIN="$input_domain"
   print_success "Домен: ${DOMAIN}"
   print_info "IP-адрес сервера: ${SERVER_IP}"
 }
 
-# ============================================================================
-# МАСКИРОВОЧНЫЙ САЙТ
-# ============================================================================
 create_masking_site() {
   print_substep "Маскировочный сайт"
   mkdir -p "$SITE_DIR"
-  
   cat > "$SITE_DIR/index.html" <<'EOF_SITE'
 <!DOCTYPE html>
 <html lang="ru">
@@ -497,29 +370,45 @@ card.style.transform = 'translateY(0)';
 </body>
 </html>
 EOF_SITE
-  
   echo -e "User-agent: *\nDisallow: /admin/" > "$SITE_DIR/robots.txt"
   printf '\x00' > "$SITE_DIR/favicon.ico" 2>/dev/null || true
-  
-  # ИСПРАВЛЕНО: опечатка www-www-data → www-data
   chown -R www-data "$SITE_DIR" 2>/dev/null || true
   chmod -R 755 "$SITE_DIR"
-  
   print_success "Сайт создан: /var/www/html/{index.html,robots.txt,favicon.ico}"
 }
 
 # ============================================================================
-# УСТАНОВКА CADDY
+# ИСПРАВЛЕНА НАСТРОЙКА CADDY (КРИТИЧЕСКИ ВАЖНО)
 # ============================================================================
 install_caddy() {
   print_substep "Caddy"
   
+  # ОСТАНОВКА КОНКУРИРУЮЩИХ СЕРВИСОВ
   for svc in nginx apache2 httpd; do
-    systemctl is-active --quiet "$svc" 2>/dev/null && {
+    if systemctl is-active --quiet "$svc" 2>/dev/null; then
+      print_info "Остановка $svc..."
       systemctl stop "$svc" &>/dev/null
       systemctl disable "$svc" &>/dev/null
-    }
+    fi
   done
+  
+  # ПРОВЕРКА ЗАНЯТОСТИ ПОРТОВ 80/443
+  print_debug "Проверка занятости портов 80/443..."
+  local port80_pid port443_pid
+  port80_pid=$(ss -tlnp 2>/dev/null | awk -F '[ :]+' '/:80 / {gsub(/.*pid=/,"",$7); gsub(/,.*/,"",$7); print $7}' | head -n1 || echo "")
+  port443_pid=$(ss -tlnp 2>/dev/null | awk -F '[ :]+' '/:443 / {gsub(/.*pid=/,"",$7); gsub(/,.*/,"",$7); print $7}' | head -n1 || echo "")
+  
+  if [[ -n "$port80_pid" ]]; then
+    print_warning "Порт 80 занят PID $port80_pid. Принудительное завершение..."
+    kill -9 "$port80_pid" 2>/dev/null || true
+    sleep 2
+  fi
+  
+  if [[ -n "$port443_pid" ]]; then
+    print_warning "Порт 443 занят PID $port443_pid. Принудительное завершение..."
+    kill -9 "$port443_pid" 2>/dev/null || true
+    sleep 2
+  fi
   
   command -v caddy &>/dev/null && \
     { print_info "✓ Уже установлен ($(caddy version | head -n1 | cut -d' ' -f1))"; return 0; }
@@ -547,81 +436,86 @@ configure_caddy() {
   
   [[ -z "$DOMAIN" ]] && print_error "DOMAIN не установлен"
   
-  for port in 80 443; do
-    local pid
-    pid=$(ss -tlnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p {print $7}' | head -n1 | cut -d',' -f2 | cut -d'=' -f2 || echo "")
-    [[ -n "$pid" && "$pid" != "1" && "$pid" != "-" ]] && kill -9 "$pid" 2>/dev/null || true
-    sleep 1
-  done
+  # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА ПОРТОВ
+  if ss -tlnp 2>/dev/null | grep -q ':80\|:443'; then
+    print_warning "Порты 80/443 всё ещё заняты. Принудительная очистка..."
+    fuser -k 80/tcp 443/tcp &>/dev/null || true
+    sleep 3
+  fi
   
+  # ГЕНЕРАЦИЯ CADDYFILE С ПРАВИЛЬНЫМ СИНТАКСИСОМ
   cat > "$CADDYFILE" <<EOF
 {
-admin off
-log {
-output file /var/log/caddy/access.log {
-roll_size 100MB
-roll_keep 5
+  admin off
+  log {
+    output file /var/log/caddy/access.log {
+      roll_size 100MB
+      roll_keep 5
+    }
+  }
 }
-}
-}
+
 ${DOMAIN} {
-root * ${SITE_DIR}
-file_server
-encode zstd gzip
+  root * ${SITE_DIR}
+  file_server
+  encode zstd gzip
 }
+
 http://127.0.0.1:8001 {
-root * ${SITE_DIR}
-file_server
+  root * ${SITE_DIR}
+  file_server
 }
 EOF
   
-  caddy validate --config "$CADDYFILE" &>/dev/null || \
-    print_error "Ошибка валидации Caddyfile"
-  
-  systemctl daemon-reload
-  systemctl enable caddy --now &>/dev/null || true
-  sleep 3
-  
-  systemctl is-active --quiet caddy && print_success "Caddy запущен" || \
-    print_error "Не удалось запустить Caddy"
-}
-
-# ============================================================================
-# УСТАНОВКА XRAY
-# ============================================================================
-install_xray() {
-  print_substep "Xray Core"
-  
-  if command -v xray &>/dev/null; then
-    local version
-    version=$(xray version 2>/dev/null | head -n1 | cut -d' ' -f1-3 || echo "unknown")
-    print_info "✓ Уже установлен (${version})"
-    return 0
+  # ВАЛИДАЦИЯ CADDYFILE С ПОДРОБНЫМ ВЫВОДОМ ОШИБОК
+  print_info "Валидация Caddyfile..."
+  if ! caddy validate --config "$CADDYFILE" &>/dev/null; then
+    print_error "Ошибка валидации Caddyfile:
+$(caddy validate --config "$CADDYFILE" 2>&1 || echo 'Не удалось запустить валидацию')"
   fi
   
-  ensure_dependency "curl" "curl"
+  print_success "Caddyfile валиден"
   
+  # ПЕРЕЗАГРУЗКА ДЕМОНА И ЗАПУСК
+  systemctl daemon-reload
+  systemctl stop caddy &>/dev/null || true
+  systemctl reset-failed caddy &>/dev/null || true
+  
+  if ! systemctl start caddy &>/dev/null; then
+    print_error "Не удалось запустить Caddy. Логи:
+$(journalctl -u caddy -n 20 --no-pager || echo 'Логи недоступны')"
+  fi
+  
+  sleep 5
+  
+  if systemctl is-active --quiet caddy; then
+    print_success "Caddy запущен"
+  else
+    journalctl -u caddy -n 30 --no-pager | tail -n 25 | sed "s/^/  ${MEDIUM_GRAY}│${RESET} /"
+    print_error "Caddy не запущен (см. логи выше)"
+  fi
+}
+
+install_xray() {
+  print_substep "Xray Core"
+  if command -v xray &>/dev/null; then
+    local version=$(xray version 2>/dev/null | head -n1 | cut -d' ' -f1-3 || echo "unknown")
+    print_info "✓ Уже установлен (${version})"; return 0
+  fi
+  ensure_dependency "curl" "curl"
   if ! bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install &>/dev/null; then
     print_error "Не удалось установить Xray"
   fi
-  
   if ! bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata &>/dev/null; then
     print_warning "Не удалось установить геофайлы (повторная попытка)..."
     bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata &>/dev/null || true
   fi
-  
-  local version
-  version=$(xray version 2>/dev/null | head -n1 | cut -d' ' -f1-3 || echo "unknown")
-  
+  local version=$(xray version 2>/dev/null | head -n1 | cut -d' ' -f1-3 || echo "unknown")
   print_success "Xray установлен (${version})"
 }
 
-# ============================================================================
-# ГЕНЕРАЦИЯ UUID
-# ============================================================================
 generate_uuid() {
   local uuid
-  
   if ! uuid=$(timeout 15 xray uuid 2>/dev/null); then
     print_error "Генерация UUID превысила 15 секунд.
 Решение:
@@ -629,93 +523,43 @@ generate_uuid() {
 2. Проверьте права: ls -la /usr/local/bin/xray
 3. Попробуйте вручную: sudo xray uuid"
   fi
-  
-  if [[ -z "$uuid" || ! "$uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
-    print_error "Некорректный UUID от 'xray uuid': '$uuid'
-Диагностика:
-• Проверьте вывод: xray uuid
-• Убедитесь, что используется Xray ≥ v1.8.0"
-  fi
-  
+  [[ -z "$uuid" || ! "$uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] && \
+    print_error "Некорректный UUID от 'xray uuid': '$uuid'"
   echo "$uuid"
 }
 
-# ============================================================================
-# ГЕНЕРАЦИЯ КОНФИГУРАЦИИ (ИСПРАВЛЕНА — КРИТИЧЕСКИ ВАЖНО)
-# ============================================================================
 generate_xray_config() {
   print_substep "Генерация конфигурации"
   
-  # 1. Создание директории с проверкой
   mkdir -p /usr/local/etc/xray "$XRAY_DAT_DIR" || print_error "Не удалось создать директории"
   
   local secret_path uuid priv_key pub_key short_id
   
-  # 2. Чтение существующих параметров
-  if [[ -f "$XRAY_KEYS" ]]; then
-    secret_path=$(grep "^path:" "$XRAY_KEYS" | awk '{print $2}' | sed 's|/||' 2>/dev/null || echo "")
-    uuid=$(grep "^uuid:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "")
-    priv_key=$(grep "^private_key:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "")
-    pub_key=$(grep "^public_key:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "")
-    short_id=$(grep "^short_id:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "")
-    
-    if [[ -n "$secret_path" && -n "$uuid" && -n "$priv_key" && -n "$pub_key" && -n "$short_id" ]]; then
-      print_info "Используются существующие параметры из ${XRAY_KEYS}"
-    else
-      print_warning "Неполные параметры в ${XRAY_KEYS}, генерируем новые"
-      rm -f "$XRAY_KEYS" 2>/dev/null || true
-    fi
-  fi
+  secret_path=$(tr -dc 'a-z0-9' < /dev/urandom | head -c 8)
+  uuid=$(generate_uuid)
+  print_success "UUID сгенерирован: ${uuid:0:8}..."
   
-  # 3. Генерация новых параметров
-  if [[ ! -f "$XRAY_KEYS" || ! -s "$XRAY_KEYS" ]]; then
-    secret_path=$(tr -dc 'a-z0-9' < /dev/urandom | head -c 8)
-    
-    print_info "Генерация UUID через 'xray uuid'..."
-    uuid=$(generate_uuid)
-    print_success "UUID сгенерирован: ${uuid:0:8}..."
-    
-    print_info "Генерация X25519 ключей..."
-    local key_pair
-    key_pair=$(xray x25519 2>&1) || \
-      print_error "Не удалось сгенерировать ключи Reality:\n${key_pair}"
-    
-    priv_key=$(echo "$key_pair" | grep -i "^PrivateKey" | awk '{print $NF}' | head -n1)
-    pub_key=$(echo "$key_pair" | grep -i "^Password" | awk '{print $NF}' | head -n1)
-    
-    if [[ -z "$priv_key" || -z "$pub_key" || "${#priv_key}" -lt 40 || "${#pub_key}" -lt 40 ]]; then
-      print_error "Некорректные ключи Reality:\n${key_pair}"
-    fi
-    
-    short_id=$(openssl rand -hex 4 2>/dev/null || echo "a1b2c3d4")
-    
-    {
-      echo "path: /${secret_path}"
-      echo "uuid: ${uuid}"
-      echo "private_key: ${priv_key}"
-      echo "public_key: ${pub_key}"
-      echo "short_id: ${short_id}"
-    } > "$XRAY_KEYS"
-    
-    chmod 600 "$XRAY_KEYS"
-    print_success "Сгенерированы новые параметры"
-  fi
+  local key_pair=$(xray x25519 2>&1) || print_error "Не удалось сгенерировать ключи Reality:\n${key_pair}"
+  priv_key=$(echo "$key_pair" | grep -i "^PrivateKey" | awk '{print $NF}' | head -n1)
+  pub_key=$(echo "$key_pair" | grep -i "^Password" | awk '{print $NF}' | head -n1)
   
-  if [[ -z "$secret_path" || -z "$uuid" || -z "$priv_key" || -z "$pub_key" || -z "$short_id" ]]; then
-    print_error "Отсутствуют критические параметры"
-  fi
+  [[ -z "$priv_key" || "${#priv_key}" -lt 40 ]] && print_error "Некорректный PrivateKey"
+  [[ -z "$pub_key" || "${#pub_key}" -lt 40 ]] && print_error "Некорректный Password (публичный ключ)"
   
-  # 4. ГЕНЕРАЦИЯ КОНФИГУРАЦИИ ЧЕРЕЗ ВРЕМЕННЫЙ ФАЙЛ (защита от обрыва записи)
+  short_id=$(openssl rand -hex 4 2>/dev/null || echo "a1b2c3d4")
+  
+  {
+    echo "path: /${secret_path}"
+    echo "uuid: ${uuid}"
+    echo "private_key: ${priv_key}"
+    echo "public_key: ${pub_key}"
+    echo "short_id: ${short_id}"
+  } > "$XRAY_KEYS"
+  chmod 600 "$XRAY_KEYS"
+  print_success "Параметры сохранены в ${XRAY_KEYS}"
+  
   local tmp_config="/tmp/xray-config-$$-${RANDOM}.json"
   
-  # Экранирование спецсимволов для корректного JSON
-  local escaped_uuid="${uuid//\"/\\\"}"
-  local escaped_domain="${DOMAIN//\"/\\\"}"
-  local escaped_priv_key="${priv_key//\"/\\\"}"
-  local escaped_short_id="${short_id//\"/\\\"}"
-  local escaped_secret_path="${secret_path//\"/\\\"}"
-  
-  # ДВУХ-INBOUND СТРУКТУРА (как в оригинальном скрипте — валидна для Xray)
   cat > "$tmp_config" <<EOF
 {
   "log": {
@@ -749,7 +593,7 @@ generate_xray_config() {
         "decryption": "none",
         "clients": [
           {
-            "id": "${escaped_uuid}",
+            "id": "${uuid}",
             "email": "main"
           }
         ]
@@ -757,7 +601,7 @@ generate_xray_config() {
       "streamSettings": {
         "network": "xhttp",
         "xhttpSettings": {
-          "path": "${escaped_secret_path}"
+          "path": "/${secret_path}"
         }
       },
       "sniffing": {
@@ -789,11 +633,11 @@ generate_xray_config() {
           "target": "127.0.0.1:8001",
           "xver": 1,
           "serverNames": [
-            "${escaped_domain}"
+            "${DOMAIN}"
           ],
-          "privateKey": "${escaped_priv_key}",
+          "privateKey": "${priv_key}",
           "shortIds": [
-            "${escaped_short_id}"
+            "${short_id}"
           ]
         }
       }
@@ -812,71 +656,60 @@ generate_xray_config() {
 }
 EOF
   
-  # 5. ВАЛИДАЦИЯ ВРЕМЕННОГО ФАЙЛА
   if [[ ! -s "$tmp_config" ]]; then
     rm -f "$tmp_config" 2>/dev/null || true
     print_error "Временный файл конфигурации пустой"
   fi
   
-  if ! jq empty "$tmp_config" &>/dev/null; then
-    print_error "Невалидный JSON в конфигурации:\n$(jq 2>&1 < "$tmp_config" || cat "$tmp_config")"
+  if ! command -v jq &>/dev/null; then
+    ensure_dependency "jq" "jq"
   fi
   
-  # 6. ПЕРЕМЕЩЕНИЕ В ЦЕЛЕВОЕ МЕСТО
-  mv "$tmp_config" "$XRAY_CONFIG" || print_error "Не удалось переместить конфиг в ${XRAY_CONFIG}"
+  if ! jq empty "$tmp_config" &>/dev/null; then
+    print_error "Невалидный JSON в конфигурации:\n$(cat "$tmp_config")"
+  fi
   
-  # ИСПРАВЛЕНО: права для Xray — root:root (не www-data)
+  mv "$tmp_config" "$XRAY_CONFIG" || print_error "Не удалось переместить конфиг в ${XRAY_CONFIG}"
   chown root:root "$XRAY_CONFIG" 2>/dev/null || true
   chmod 644 "$XRAY_CONFIG"
   
-  print_debug "Конфигурация создана: $(wc -c < "$XRAY_CONFIG") байт"
+  print_debug "Конфиг создан: $(wc -c < "$XRAY_CONFIG") байт"
   
-  # 7. ФИНАЛЬНАЯ ВАЛИДАЦИЯ XRAY С ПОЛНЫМ ВЫВОДОМ ОШИБОК
-  print_info "Валидация конфигурации Xray..."
-  
-  # Проверка существования файла
   if [[ ! -f "$XRAY_CONFIG" ]]; then
-    print_error "Файл конфигурации не существует: ${XRAY_CONFIG}"
+    print_error "Файл конфигурации НЕ СУЩЕСТВУЕТ: ${XRAY_CONFIG}"
   fi
   
-  # Проверка размера файла
-  if [[ $(wc -c < "$XRAY_CONFIG") -lt 100 ]]; then
-    print_error "Файл конфигурации слишком мал (< 100 байт). Содержимое:\n$(cat "$XRAY_CONFIG" || echo 'Ошибка чтения')"
+  local file_size
+  file_size=$(stat -c%s "$XRAY_CONFIG" 2>/dev/null || echo 0)
+  if [[ "$file_size" -lt 100 ]]; then
+    print_error "Файл конфигурации слишком мал (< 100 байт, размер=${file_size}):\n$(cat "$XRAY_CONFIG" 2>/dev/null || echo 'Ошибка чтения файла')"
   fi
   
-  # Валидация с полным выводом ошибок
-  if ! xray run -test -config "$XRAY_CONFIG" &>/dev/null; then
-    print_error "Ошибка валидации конфигурации Xray. Детали:
-$(xray run -test -config "$XRAY_CONFIG" 2>&1 || echo 'Не удалось запустить валидацию')"
+  if ! xray run -test -c "$XRAY_CONFIG" &>/dev/null; then
+    print_error "Ошибка валидации конфигурации Xray:\n$(xray run -test -c "$XRAY_CONFIG" 2>&1 || echo 'Не удалось запустить валидацию')"
   fi
   
   print_success "Конфигурация Xray валидна"
   
-  # 8. ЗАПУСК СЕРВИСА
+  systemctl daemon-reload 2>/dev/null || true
   if systemctl is-active --quiet xray 2>/dev/null; then
-    systemctl restart xray &>/dev/null || \
-      print_error "Не удалось перезапустить Xray"
+    systemctl restart xray &>/dev/null || print_error "Не удалось перезапустить Xray"
   else
-    systemctl enable xray --now &>/dev/null || \
-      print_error "Не удалось запустить Xray"
+    systemctl start xray &>/dev/null || print_error "Не удалось запустить Xray"
   fi
   
-  sleep 3
+  sleep 5
   
   if systemctl is-active --quiet xray; then
     print_success "Xray запущен"
   else
-    journalctl -u xray -n 20 --no-pager | tail -n 15 | sed "s/^/  ${MEDIUM_GRAY}│${RESET} /"
-    print_error "Не удалось запустить Xray (см. логи выше)"
+    journalctl -u xray -n 30 --no-pager | tail -n 20 | sed "s/^/  ${MEDIUM_GRAY}│${RESET} /"
+    print_error "Xray не запущен (см. логи выше)"
   fi
 }
 
-# ============================================================================
-# АВТООБНОВЛЕНИЯ
-# ============================================================================
 setup_auto_updates() {
   print_step "Автообновления"
-  
   cat > /etc/systemd/system/xray-core-update.service <<'EOF'
 [Unit]
 Description=Update Xray Core
@@ -887,7 +720,6 @@ Type=oneshot
 ExecStart=/bin/bash -c 'curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh | bash -s @ install'
 User=root
 EOF
-  
   cat > /etc/systemd/system/xray-core-update.timer <<'EOF'
 [Unit]
 Description=Weekly Xray Core Update
@@ -899,7 +731,6 @@ Unit=xray-core-update.service
 [Install]
 WantedBy=timers.target
 EOF
-  
   cat > /etc/systemd/system/xray-geo-update.service <<'EOF'
 [Unit]
 Description=Update Xray Geo Files
@@ -910,7 +741,6 @@ Type=oneshot
 ExecStart=/bin/bash -c 'curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh | bash -s @ install-geodata'
 User=root
 EOF
-  
   cat > /etc/systemd/system/xray-geo-update.timer <<'EOF'
 [Unit]
 Description=Daily Xray Geo Files Update
@@ -922,21 +752,14 @@ Unit=xray-geo-update.service
 [Install]
 WantedBy=timers.target
 EOF
-  
   systemctl daemon-reload
   systemctl enable xray-core-update.timer xray-geo-update.timer --now &>/dev/null || true
-  
   print_success "Автообновления настроены"
 }
 
-# ============================================================================
-# УТИЛИТА УПРАВЛЕНИЯ
-# ============================================================================
 create_user_utility() {
   print_substep "Утилита управления"
-  
   ! command -v qrencode &>/dev/null && ensure_dependency "qrencode" "qrencode"
-  
   cat > /usr/local/bin/user <<'EOF_SCRIPT'
 #!/bin/bash
 set -euo pipefail
@@ -958,7 +781,6 @@ get_params() {
 generate_link() {
   local uuid="$1" email="$2"
   IFS='|' read -r sp pk sid dom port ip < <(get_params 2>/dev/null || echo "|||example.com|443|127.0.0.1")
-  # ИСПРАВЛЕНО: двойной слеш в пути (%2F%2F) как в рабочем примере
   echo "vless://${uuid}@${ip}:${port}?security=reality&encryption=none&pbk=${pk}&fp=chrome&sni=${dom}&sid=${sid}&type=xhttp&path=%2F${sp}%2F#${email}"
 }
 
@@ -1017,7 +839,6 @@ HELP
     ;;
 esac
 EOF_SCRIPT
-  
   chmod +x /usr/local/bin/user
   print_success "Утилита 'user' установлена"
 }
@@ -1061,47 +882,36 @@ Caddy: systemctl {status|restart} caddy
 • Для именованного UUID: xray uuid -i "имя_пользователя"
 
 ВАЛИДАЦИЯ КОНФИГУРАЦИИ
-• Правильная команда: xray run -test -config /path/to/config.json
+• Правильная команда: xray run -test -c /usr/local/etc/xray/config.json
 EOF_HELP
-  
   chmod 644 "$HELP_FILE"
   print_success "Файл помощи: ${HELP_FILE}"
 }
 
-# ============================================================================
-# ОСНОВНОЕ ВЫПОЛНЕНИЕ
-# ============================================================================
 main() {
   echo -e "
 ${BOLD}${SOFT_BLUE}Xray VLESS/XHTTP/Reality Installer${RESET}"
-  echo -e "${LIGHT_GRAY}Исправлено: генерация конфигурации • Защита от пустых файлов • Рабочий спиннер${RESET}"
+  echo -e "${LIGHT_GRAY}Исправлено: запуск Caddy • Очистка портов 80/443 • Валидация Caddyfile${RESET}"
   echo -e "${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}
 "
   
   log "=== НАЧАЛО УСТАНОВКИ ==="
-  
   check_root
   
-  # 1. Обновление системы
   update_system
-  
   export DEBIAN_FRONTEND=noninteractive
   
-  # 2. Системные оптимизации
   print_step "Системные оптимизации"
   optimize_swap
   optimize_network
   configure_trim
   
-  # 3. Настройка домена
   prompt_domain
   
-  # 4. Безопасность
   print_step "Безопасность"
   configure_firewall
   configure_fail2ban
   
-  # 5. Зависимости
   print_step "Зависимости"
   ensure_dependency "curl" "curl"
   ensure_dependency "jq" "jq"
@@ -1116,29 +926,23 @@ ${BOLD}${SOFT_BLUE}Xray VLESS/XHTTP/Reality Installer${RESET}"
   ensure_dependency "haveged" "haveged"
   print_success "Все зависимости установлены"
   
-  # 6. Маскировочный сайт
   print_step "Маскировка"
   create_masking_site
   
-  # 7. Caddy
   print_step "Caddy"
   install_caddy
-  configure_caddy
+  configure_caddy  # <-- ИСПРАВЛЕНА НАСТРОЙКА
   
-  # 8. Xray
   print_step "Xray"
   install_xray
-  generate_xray_config  # <-- ИСПРАВЛЕНА ГЕНЕРАЦИЯ КОНФИГУРАЦИИ
+  generate_xray_config
   
-  # 9. Автообновления
   setup_auto_updates
   
-  # 10. Утилиты
   print_step "Утилиты"
   create_user_utility
   create_help_file
   
-  # ФИНАЛ
   echo -e "
 ${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
   echo -e "${BOLD}${SOFT_GREEN}✓ Установка завершена${RESET}"
@@ -1154,15 +958,10 @@ ${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━�
   echo -e "Документация: ${BOLD}cat ~/help${RESET}"
   echo
   
-  if [[ $REBOOT_REQUIRED -eq 1 ]]; then
-    echo -e "${SOFT_YELLOW}⚠${RESET} ${BOLD}Требуется перезагрузка${RESET} для применения обновлений ядра"
-    echo -e "   Выполните после завершения настройки: ${BOLD}sudo reboot${RESET}"
-  fi
+  [[ $REBOOT_REQUIRED -eq 1 ]] && \
+    echo -e "${SOFT_YELLOW}⚠${RESET} Требуется перезагрузка: ${BOLD}sudo reboot${RESET}"
   
   echo -e "${SOFT_YELLOW}ℹ${RESET} SSL-сертификат будет получен автоматически при первом запросе к ${BOLD}https://${DOMAIN}${RESET}"
-  echo
-  
-  log "=== УСТАНОВКА ЗАВЕРШЕНА УСПЕШНО ==="
 }
 
 main "$@"
