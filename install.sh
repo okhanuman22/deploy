@@ -621,6 +621,13 @@ install_xray() {
     print_error "Не удалось установить Xray официальным установщиком. Проверьте сетевое подключение."
   fi
   
+  # Установка геофайлов
+  print_info "Установка геофайлов (geoip.dat, geosite.dat)..."
+  if ! bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata >/dev/null 2>&1; then
+    print_warning "Не удалось установить геофайлы. Попытка повторной установки..."
+    bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata || true
+  fi
+  
   print_success "Xray установлен (версия: $(xray version 2>/dev/null | head -n1 || echo 'unknown'))"
 }
 
@@ -642,10 +649,20 @@ generate_xray_config() {
   else
     secret_path=$(tr -dc 'a-z0-9' < /dev/urandom | head -c 8)
     uuid=$(cat /proc/sys/kernel/random/uuid)
+    
+    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: корректная генерация ключей для Reality
+    # Вывод 'xray x25519' содержит:
+    #   PrivateKey: ... → приватный ключ (для сервера)
+    #   Password:   ... → ПУБЛИЧНЫЙ ключ (для клиента, несмотря на название "Password")
     local key_pair
-    key_pair=$(xray x25519 2>/dev/null || echo -e "Private key: cCxc5EJIDFlqlp5uFXLIo_OMTXzwmMlztmitB2CIw3s\nPublic key: VqCnBCOjZ2xvj0fquZpCQEyzpZtMhr4-JvkNK23jd3E")
-    priv_key=$(echo "$key_pair" | grep -i "private" | awk '{print $NF}')
-    pub_key=$(echo "$key_pair" | grep -i "public" | awk '{print $NF}')
+    key_pair=$(xray x25519 2>/dev/null || echo -e "PrivateKey: cCxc5EJIDFlqlp5uFXLIo_OMTXzwmMlztmitB2CIw3s\nPassword: VqCnBCOjZ2xvj0fquZpCQEyzpZtMhr4-JvkNK23jd3E")
+    
+    # Извлечение приватного ключа (для конфигурации сервера)
+    priv_key=$(echo "$key_pair" | grep -i "^PrivateKey" | awk '{print $NF}')
+    
+    # Извлечение ПУБЛИЧНОГО ключа (для клиента, поле 'Password' в выводе = публичный ключ)
+    pub_key=$(echo "$key_pair" | grep -i "^Password" | awk '{print $NF}')
+    
     short_id=$(openssl rand -hex 4)
     
     {
@@ -662,6 +679,8 @@ generate_xray_config() {
   print_info "Путь: /${secret_path}"
   print_info "UUID: ${uuid:0:8}..."
   print_info "ShortID: ${short_id}"
+  print_info "Private key: ${priv_key:0:8}..."  # Только первые 8 символов для лога
+  print_info "Public key:  ${pub_key:0:8}..."   # Только первые 8 символов для лога
   
   cat > "$XRAY_CONFIG" <<EOF
 {
@@ -773,110 +792,30 @@ EOF
 }
 
 # ============================================================================
-# Автоматические обновления
+# Автоматические обновления (только официальный установщик)
 # ============================================================================
 
 setup_auto_updates() {
   print_step "Настройка автоматических обновлений"
   
-  # 1. Скрипт обновления ядра Xray
-  cat > /usr/local/bin/xray-update-core <<'EOF_UPDATE_CORE'
-#!/bin/bash
-set -euo pipefail
-
-LOG_FILE="/var/log/xray-core-update.log"
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Начало обновления Xray core" >> "$LOG_FILE"
-
-CURRENT_VERSION=$(xray version 2>/dev/null | head -n1 || echo "unknown")
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Текущая версия: ${CURRENT_VERSION}" >> "$LOG_FILE"
-
-# Официальный установщик всегда устанавливает последнюю версию
-if bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >> "$LOG_FILE" 2>&1; then
-  NEW_VERSION=$(xray version 2>/dev/null | head -n1 || echo "unknown")
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Установлена версия: ${NEW_VERSION}" >> "$LOG_FILE"
-  
-  if systemctl is-active --quiet xray; then
-    systemctl restart xray >> "$LOG_FILE" 2>&1
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Сервис Xray перезапущен" >> "$LOG_FILE"
-  fi
-  
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Обновление успешно завершено" >> "$LOG_FILE"
-  exit 0
-else
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Ошибка обновления" >> "$LOG_FILE"
-  exit 1
-fi
-EOF_UPDATE_CORE
-  
-  chmod +x /usr/local/bin/xray-update-core
-  print_success "Скрипт обновления ядра: /usr/local/bin/xray-update-core"
-  
-  # 2. Скрипт обновления Geo-файлов
-  cat > /usr/local/bin/xray-update-geo <<'EOF_UPDATE_GEO'
-#!/bin/bash
-set -euo pipefail
-
-LOG_FILE="/var/log/xray-geo-update.log"
-DAT_DIR="/usr/local/share/xray"
-TEMP_DIR=$(mktemp -d)
-
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Начало обновления Geo-файлов" >> "$LOG_FILE"
-
-# Загрузка последних версий от v2fly
-curl -fsSL "https://github.com/v2fly/geoip/releases/latest/download/geoip.dat" -o "${TEMP_DIR}/geoip.dat" >> "$LOG_FILE" 2>&1
-curl -fsSL "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat" -o "${TEMP_DIR}/geosite.dat" >> "$LOG_FILE" 2>&1
-
-# Проверка целостности файлов
-if ! file "${TEMP_DIR}/geoip.dat" | grep -q "data"; then
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Ошибка: повреждённый geoip.dat" >> "$LOG_FILE"
-  rm -rf "$TEMP_DIR"
-  exit 1
-fi
-
-if ! file "${TEMP_DIR}/geosite.dat" | grep -q "data"; then
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Ошибка: повреждённый geosite.dat" >> "$LOG_FILE"
-  rm -rf "$TEMP_DIR"
-  exit 1
-fi
-
-# Установка файлов
-install -m 644 "${TEMP_DIR}/geoip.dat" "${DAT_DIR}/geoip.dat" >> "$LOG_FILE" 2>&1
-install -m 644 "${TEMP_DIR}/geosite.dat" "${DAT_DIR}/geosite.dat" >> "$LOG_FILE" 2>&1
-
-rm -rf "$TEMP_DIR"
-
-# Перезапуск Xray для применения новых правил
-if systemctl is-active --quiet xray; then
-  systemctl restart xray >> "$LOG_FILE" 2>&1
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Geo-файлы обновлены, Xray перезапущен" >> "$LOG_FILE"
-else
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Geo-файлы обновлены (сервис не активен)" >> "$LOG_FILE"
-fi
-
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Обновление Geo-файлов завершено" >> "$LOG_FILE"
-exit 0
-EOF_UPDATE_GEO
-  
-  chmod +x /usr/local/bin/xray-update-geo
-  print_success "Скрипт обновления Geo: /usr/local/bin/xray-update-geo"
-  
-  # 3. Systemd timer для обновления ядра (каждое воскресенье в 3:00)
-  cat > /etc/systemd/system/xray-core-update.service <<EOF
+  # 1. Еженедельное обновление ядра Xray (воскресенье 03:00)
+  cat > /etc/systemd/system/xray-core-update.service <<'EOF_CORE_SERVICE'
 [Unit]
-Description=Update Xray Core
+Description=Update Xray Core to Latest Version
 After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/xray-update-core
+ExecStart=/bin/bash -c 'curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh | bash -s @ install'
 User=root
 StandardOutput=append:/var/log/xray-core-update.log
 StandardError=append:/var/log/xray-core-update.log
-EOF
+EOF_CORE_SERVICE
 
-  cat > /etc/systemd/system/xray-core-update.timer <<EOF
+  cat > /etc/systemd/system/xray-core-update.timer <<'EOF_CORE_TIMER'
 [Unit]
-Description=Weekly Xray Core Update
+Description=Weekly Xray Core Update (Official Installer)
 After=network-online.target
 
 [Timer]
@@ -886,48 +825,50 @@ Unit=xray-core-update.service
 
 [Install]
 WantedBy=timers.target
-EOF
+EOF_CORE_TIMER
 
   systemctl daemon-reload
   systemctl enable xray-core-update.timer --now >/dev/null 2>&1
-  print_success "Таймер обновления ядра активирован (каждое воскресенье 03:00)"
+  print_success "Автообновление ядра: каждое воскресенье 03:00"
   
-  # 4. Systemd timer для обновления Geo-файлов (каждую среду в 3:00)
-  cat > /etc/systemd/system/xray-geo-update.service <<EOF
+  # 2. ЕЖЕДНЕВНОЕ обновление геофайлов (03:00)
+  cat > /etc/systemd/system/xray-geo-update.service <<'EOF_GEO_SERVICE'
 [Unit]
-Description=Update Xray Geo Files
+Description=Update Xray Geo Files (geoip.dat, geosite.dat)
 After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/xray-update-geo
+ExecStart=/bin/bash -c 'curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh | bash -s @ install-geodata'
 User=root
 StandardOutput=append:/var/log/xray-geo-update.log
 StandardError=append:/var/log/xray-geo-update.log
-EOF
+EOF_GEO_SERVICE
 
-  cat > /etc/systemd/system/xray-geo-update.timer <<EOF
+  cat > /etc/systemd/system/xray-geo-update.timer <<'EOF_GEO_TIMER'
 [Unit]
-Description=Weekly Xray Geo Files Update
+Description=Daily Xray Geo Files Update (Official Installer)
 After=network-online.target
 
 [Timer]
-OnCalendar=Wed 03:00
+OnCalendar=*-*-* 03:00:00
 Persistent=true
 Unit=xray-geo-update.service
 
 [Install]
 WantedBy=timers.target
-EOF
+EOF_GEO_TIMER
 
   systemctl daemon-reload
   systemctl enable xray-geo-update.timer --now >/dev/null 2>&1
-  print_success "Таймер обновления Geo активирован (каждую среду 03:00)"
+  print_success "Автообновление геофайлов: ежедневно 03:00"
   
-  # 5. Ручные команды для обновления
-  print_info "Ручное обновление ядра:   sudo xray-update-core"
-  print_info "Ручное обновление Geo:    sudo xray-update-geo"
-  print_info "Статус таймеров:          systemctl list-timers | grep xray"
+  # 3. Информация для пользователя
+  print_info "Ручное обновление ядра:   sudo systemctl start xray-core-update.service"
+  print_info "Ручное обновление Geo:    sudo systemctl start xray-geo-update.service"
+  print_info "Просмотр таймеров:        systemctl list-timers | grep xray"
+  print_info "Логи обновлений:          /var/log/xray-*-update.log"
 }
 
 # ============================================================================
@@ -1059,12 +1000,13 @@ create_help_file() {
   user link    Сгенерировать ссылку подключения
 
 АВТОМАТИЧЕСКИЕ ОБНОВЛЕНИЯ
-  • Ядро Xray: каждое воскресенье в 03:00
-  • Geo-файлы: каждую среду в 03:00
+  • Ядро Xray:   каждое воскресенье в 03:00
+  • Геофайлы:    ежедневно в 03:00
   
-  Ручное обновление ядра:   sudo xray-update-core
-  Ручное обновление Geo:    sudo xray-update-geo
+  Ручное обновление ядра:   sudo systemctl start xray-core-update.service
+  Ручное обновление Geo:    sudo systemctl start xray-geo-update.service
   Статус таймеров:          systemctl list-timers | grep xray
+  Логи обновлений:          /var/log/xray-*-update.log
 
 ВАЖНЫЕ ФАЙЛЫ
   Конфигурация:  /usr/local/etc/xray/config.json
@@ -1091,6 +1033,11 @@ create_help_file() {
   • Невалидные XHTTP-пути → тот же сайт через fallback
   • Валидные XHTTP-пути → прямой доступ в интернет
   • Весь трафик выглядит как легитимные посещения сайта
+
+КРИТИЧЕСКИ ВАЖНО: КЛЮЧИ REALITY
+  • PrivateKey (вывод 'xray x25519'): приватный ключ → в конфиг сервера (privateKey)
+  • Password (вывод 'xray x25519'): ПУБЛИЧНЫЙ ключ → для клиента (параметр pbk в ссылке)
+  • Не путайте поля! Название "Password" в выводе вводит в заблуждение.
 EOF_HELP
   
   chmod 644 "$HELP_FILE"
@@ -1176,16 +1123,16 @@ main() {
   echo
   
   echo -e "${BOLD}Управление:${RESET}"
-  echo -e "  ${MEDIUM_GRAY}user list${RESET}         # Список клиентов"
-  echo -e "  ${MEDIUM_GRAY}user add${RESET}          # Создать пользователя"
-  echo -e "  ${MEDIUM_GRAY}xray-update-core${RESET}  # Обновить ядро Xray"
-  echo -e "  ${MEDIUM_GRAY}xray-update-geo${RESET}   # Обновить Geo-файлы"
-  echo -e "  ${MEDIUM_GRAY}cat ~/help${RESET}        # Полная документация"
+  echo -e "  ${MEDIUM_GRAY}user list${RESET}               # Список клиентов"
+  echo -e "  ${MEDIUM_GRAY}user add${RESET}                # Создать пользователя"
+  echo -e "  ${MEDIUM_GRAY}systemctl start xray-core-update.service${RESET}  # Обновить ядро"
+  echo -e "  ${MEDIUM_GRAY}systemctl start xray-geo-update.service${RESET}   # Обновить геофайлы"
+  echo -e "  ${MEDIUM_GRAY}cat ~/help${RESET}              # Полная документация"
   echo
   
   echo -e "${BOLD}Автоматические обновления:${RESET}"
-  echo -e "  • Ядро Xray:   каждое воскресенье в 03:00"
-  echo -e "  • Geo-файлы:   каждую среду в 03:00"
+  echo -e "  • Ядро Xray:   каждое воскресенье 03:00"
+  echo -e "  • Геофайлы:    ежедневно 03:00"
   echo -e "  • Статус:      systemctl list-timers | grep xray"
   echo
   
