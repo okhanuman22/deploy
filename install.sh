@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# Xray VLESS/XHTTP/Reality Installer (v3.8 — исправлен stdout/stderr, QR-код, финальная сводка)
+# Xray VLESS/XHTTP/Reality Installer (v3.9 — pipe-friendly, интерактивный режим)
 # ============================================================================
 DARK_GRAY='\033[38;5;242m'
 SOFT_BLUE='\033[38;5;67m'
@@ -11,6 +11,10 @@ MEDIUM_GRAY='\033[38;5;246m'
 LIGHT_GRAY='\033[38;5;250m'
 BOLD='\033[1m'
 RESET='\033[0m'
+
+# ИСПРАВЛЕНО: проверка интерактивного режима
+IS_INTERACTIVE=false
+[[ -t 0 ]] && IS_INTERACTIVE=true  # stdin является терминалом
 
 readonly LOG_FILE="/var/log/xray-installer.log"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE" 2>/dev/null || true; }
@@ -39,6 +43,31 @@ print_substep() { echo -e "${MEDIUM_GRAY}  →${RESET} ${1}"; log "SUBSTEP: $1";
 print_debug() { 
   echo "[DEBUG] $1" >&2
   log "DEBUG: $1"
+}
+
+# ИСПРАВЛЕНО: функция для безопасного ввода (работает и в pipe, и интерактивно)
+safe_read() {
+  local var_name="$1"
+  local prompt="$2"
+  local default_value="${3:-}"
+  
+  if [[ "$IS_INTERACTIVE" == true ]]; then
+    # Интерактивный режим - читаем с терминала
+    if [[ -n "$default_value" ]]; then
+      read -rp "$prompt [$default_value]: " "$var_name" < /dev/tty
+      [[ -z "${!var_name}" ]] && eval "$var_name='$default_value'"
+    else
+      read -rp "$prompt: " "$var_name" < /dev/tty
+    fi
+  else
+    # Неинтерактивный режим (pipe) - используем default или ошибка
+    if [[ -n "$default_value" ]]; then
+      eval "$var_name='$default_value'"
+      echo "$prompt: $default_value (auto)"
+    else
+      print_error "Неинтерактивный режим: требуется переменная окружения для $var_name"
+    fi
+  fi
 }
 
 run_with_spinner() {
@@ -268,12 +297,15 @@ sanitize_domain() {
 prompt_domain() {
   print_step "Домен"
   
+  # ИСПРАВЛЕНО: проверка DOMAIN из переменной окружения
   if [[ -n "$DOMAIN" ]]; then
     DOMAIN=$(sanitize_domain "$DOMAIN")
+    print_info "Используется DOMAIN из переменной окружения: ${DOMAIN}"
     validate_domain "$DOMAIN"
     return
   fi
   
+  # ИСПРАВЛЕНО: проверка существующего конфига
   if [[ -f "$XRAY_CONFIG" ]] && command -v jq &>/dev/null; then
     local existing_domain=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0] // ""' "$XRAY_CONFIG" 2>/dev/null || echo "")
     existing_domain=$(sanitize_domain "$existing_domain")
@@ -285,13 +317,12 @@ prompt_domain() {
     fi
   fi
   
+  # ИСПРАВЛЕНО: интерактивный ввод с проверкой pipe
   echo -e "${BOLD}Введите домен${RESET} (пример: ваш-домен.duckdns.org)"
   echo -e "${LIGHT_GRAY}Домен должен быть привязан к IP-адресу этого сервера${RESET}"
   
   local input_domain=""
-  if ! read -r input_domain < /dev/tty 2>/dev/null; then
-    print_error "Не удалось прочитать домен из терминала"
-  fi
+  safe_read input_domain "Домен"
   
   input_domain=$(sanitize_domain "$input_domain")
   
@@ -309,23 +340,25 @@ validate_domain() {
   if [[ -n "$ipv4" ]]; then
     print_success "DNS A-запись найдена: ${ipv4}"
   else
-    local confirm=""
-    echo -e "${SOFT_YELLOW}⚠${RESET} DNS для ${BOLD}${input_domain}${RESET} не найден."
-    if read -p "Продолжить без проверки DNS? [y/N]: " confirm < /dev/tty 2>/dev/null; then
+    print_warning "DNS для ${BOLD}${input_domain}${RESET} не найден"
+    if [[ "$IS_INTERACTIVE" == true ]]; then
+      local confirm=""
+      safe_read confirm "Продолжить без проверки DNS" "N"
       [[ ! "$confirm" =~ ^[Yy]$ ]] && print_error "Установка прервана"
     else
-      print_warning "DNS не найден (продолжаем без проверки)"
+      print_warning "Продолжаем без проверки DNS (неинтерактивный режим)"
     fi
   fi
   
   SERVER_IP=$(get_public_ip)
   if [[ -n "$ipv4" && "$ipv4" != "$SERVER_IP" ]]; then
-    local confirm=""
-    echo -e "${SOFT_YELLOW}⚠${RESET} DNS (${ipv4}) ≠ IP сервера (${SERVER_IP})."
-    if read -p "Продолжить с несоответствующим DNS? [y/N]: " confirm < /dev/tty 2>/dev/null; then
+    print_warning "DNS (${ipv4}) ≠ IP сервера (${SERVER_IP})"
+    if [[ "$IS_INTERACTIVE" == true ]]; then
+      local confirm=""
+      safe_read confirm "Продолжить с несоответствующим DNS" "N"
       [[ ! "$confirm" =~ ^[Yy]$ ]] && print_error "Установка прервана"
     else
-      print_warning "DNS не соответствует IP сервера (продолжаем)"
+      print_warning "Продолжаем с несоответствующим DNS (неинтерактивный режим)"
     fi
   fi
   
@@ -557,7 +590,7 @@ install_xray() {
   print_success "Xray установлен (${version})"
 }
 
-# ИСПРАВЛЕНО: функция возвращает ТОЛЬКО UUID в stdout, все сообщения в stderr
+# ИСПРАВЛЕНО: функция возвращает ТОЛЬКО UUID в stdout
 generate_uuid_safe() {
   # Все выводы информации в stderr (>&2), только UUID в stdout
   echo "[DEBUG] Проверка энтропии" >&2
@@ -960,7 +993,7 @@ EOF_HELP
   print_success "Файл помощи: ${HELP_FILE}"
 }
 
-# ИСПРАВЛЕНО: функция для безопасного чтения параметров из .keys
+# Функция для безопасного чтения параметров из .keys
 get_key_param() {
   local param="$1"
   if [[ -f "$XRAY_KEYS" ]]; then
@@ -971,9 +1004,16 @@ get_key_param() {
 main() {
   echo -e "
 ${BOLD}${SOFT_BLUE}Xray VLESS/XHTTP/Reality Installer${RESET}"
-  echo -e "${LIGHT_GRAY}Исправлено: stdout/stderr • QR-код в финале • Валидация всех переменных${RESET}"
+  echo -e "${LIGHT_GRAY}Pipe-friendly • Интерактивный режим • QR-код в финале${RESET}"
   echo -e "${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}
 "
+  
+  # ИСПРАВЛЕНО: информация о режиме работы
+  if [[ "$IS_INTERACTIVE" == true ]]; then
+    print_info "Режим: интерактивный (ввод с клавиатуры)"
+  else
+    print_info "Режим: неинтерактивный (pipe). Используйте DOMAIN=ваш.домен для автоматической установки"
+  fi
   
   log "=== НАЧАЛО УСТАНОВКИ ==="
   check_root
@@ -1024,7 +1064,7 @@ ${BOLD}${SOFT_BLUE}Xray VLESS/XHTTP/Reality Installer${RESET}"
   create_user_utility
   create_help_file
   
-  # ИСПРАВЛЕНО: читаем параметры через функцию с очисткой
+  # Читаем параметры через функцию с очисткой
   local final_uuid final_path final_domain final_ip final_pk final_sid
   final_uuid=$(get_key_param "uuid")
   final_path=$(get_key_param "path")
