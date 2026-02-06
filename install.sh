@@ -97,7 +97,7 @@ readonly CADDYFILE="/etc/caddy/Caddyfile"
 readonly SITE_DIR="/var/www/html"
 readonly HELP_FILE="${HOME}/help"
 
-sed -i '100s/.*/DOMAIN="${DOMAIN:-}"\nexport DOMAIN/' install.sh
+sed -i '100s/.*/DOMAIN="${DOMAIN:-}"\nexport DOMAIN/'
 SERVER_IP=""
 
 check_root() {
