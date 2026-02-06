@@ -63,20 +63,18 @@ DOMAIN="${DOMAIN:-}"
 SERVER_IP=""
 
 # ============================================================================
-# Функции проверки зависимостей (с корректными именами команд)
+# Функции проверки зависимостей
 # ============================================================================
 
 ensure_dependency() {
   local pkg="$1"
-  local cmd="${2:-$pkg}"  # Второй параметр - имя команды (по умолчанию = имени пакета)
+  local cmd="${2:-$pkg}"
   
-  # Проверка наличия команды
   if command -v "$cmd" &>/dev/null; then
     print_info "Зависимость '${pkg}' доступна"
     return 0
   fi
   
-  # Проверка через dpkg для пакетов без команд (например, ca-certificates)
   if [[ "$cmd" == "-" ]]; then
     if dpkg -l | grep -q "^ii  $pkg "; then
       print_info "Пакет '${pkg}' уже установлен"
@@ -89,7 +87,6 @@ ensure_dependency() {
     print_error "Не удалось установить ${pkg}. Проверьте подключение к интернету."
   fi
   
-  # Повторная проверка команды (если требуется)
   if [[ "$cmd" != "-" ]] && ! command -v "$cmd" &>/dev/null; then
     print_error "После установки ${pkg} команда '${cmd}' недоступна"
   fi
@@ -97,7 +94,6 @@ ensure_dependency() {
   print_success "Зависимость '${pkg}' установлена"
 }
 
-# Функция для определения процесса на порту
 get_process_on_port() {
   local port="$1"
   local proto="${2:-tcp}"
@@ -111,7 +107,6 @@ get_process_on_port() {
   fi
 }
 
-# Функция для безопасной очистки портов
 free_ports() {
   local ports=("80" "443")
   local proto="tcp"
@@ -127,7 +122,6 @@ free_ports() {
       continue
     fi
     
-    # Определение имени процесса
     local proc_name
     if command -v ps &>/dev/null; then
       proc_name=$(ps -p "$pid" -o comm= 2>/dev/null || echo "PID ${pid}")
@@ -137,7 +131,6 @@ free_ports() {
     
     print_warning "Порт ${port}/${proto} занят: ${proc_name} (PID ${pid})"
     
-    # Попытка остановки через системные сервисы
     local stopped=false
     for svc in nginx apache2 httpd caddy; do
       if systemctl is-active --quiet "$svc" 2>/dev/null; then
@@ -149,13 +142,11 @@ free_ports() {
       fi
     done
     
-    # Если не остановлен через сервис — принудительная остановка
     if [[ "$stopped" == false ]]; then
       print_info "Принудительная остановка PID ${pid}..."
       kill -9 "$pid" 2>/dev/null || true
     fi
     
-    # Ожидание освобождения порта
     local attempts=0
     while [[ -n "$(get_process_on_port "$port" "$proto" || echo "")" ]] && [[ $attempts -lt 5 ]]; do
       sleep 1
@@ -168,17 +159,6 @@ free_ports() {
     
     print_success "Порт ${port}/${proto} освобождён"
   done
-}
-
-check_port_availability() {
-  local port="$1"
-  local proto="${2:-tcp}"
-  
-  if [[ -n "$(get_process_on_port "$port" "$proto" || echo "")" ]]; then
-    print_error "Порт ${port}/${proto} занят другим процессом. Остановите конфликтующий сервис."
-  fi
-  
-  print_info "Порт ${port}/${proto} доступен"
 }
 
 validate_dns_record() {
@@ -198,8 +178,8 @@ check_dns_configuration() {
   print_substep "Проверка DNS-записей для ${DOMAIN}..."
   
   local ipv4
-  
   ipv4=$(validate_dns_record "$DOMAIN" "A" || echo "")
+  
   if [[ -n "$ipv4" ]]; then
     print_success "DNS A-запись найдена: ${ipv4}"
   else
@@ -208,7 +188,6 @@ check_dns_configuration() {
     [[ ! "$confirm" =~ ^[Yy]$ ]] && print_error "Установка прервана пользователем"
   fi
   
-  # Проверка соответствия IP сервера
   SERVER_IP=$(get_public_ip)
   if [[ -n "$ipv4" && "$ipv4" != "$SERVER_IP" ]]; then
     print_warning "DNS указывает на ${ipv4}, но сервер имеет IP ${SERVER_IP}"
@@ -234,14 +213,12 @@ get_public_ip() {
 prompt_domain() {
   print_step "Настройка домена"
   
-  # Если домен задан через переменную окружения — использовать его
   if [[ -n "$DOMAIN" ]]; then
     print_info "Используется домен из переменной окружения: ${DOMAIN}"
     check_dns_configuration
     return
   fi
   
-  # Попытка обнаружить существующий домен из конфигурации
   local existing_domain=""
   if [[ -f "$XRAY_CONFIG" ]] && command -v jq &>/dev/null; then
     existing_domain=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0] // empty' "$XRAY_CONFIG" 2>/dev/null || echo "")
@@ -260,7 +237,6 @@ prompt_domain() {
     esac
   fi
   
-  # Интерактивный запрос с понятной подсказкой
   while true; do
     local input_domain
     read -p "$(echo -e "${BOLD}Введите Ваш домен${RESET} (например, wishnu.duckdns.org): ")" input_domain < /dev/tty 2>/dev/null || {
@@ -273,7 +249,6 @@ prompt_domain() {
       continue
     fi
     
-    # Валидация домена
     if [[ ! "$input_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
       print_warning "Неверный формат домена (пример: ваш-домен.duckdns.org)"
       continue
@@ -287,7 +262,7 @@ prompt_domain() {
 }
 
 # ============================================================================
-# Фаза 1: Системные оптимизации (идемпотентные)
+# Системные оптимизации
 # ============================================================================
 
 optimize_swap() {
@@ -317,7 +292,6 @@ optimize_swap() {
 optimize_network() {
   print_substep "Оптимизация сетевого стека"
   
-  # Проверка текущего состояния BBR
   local current_cc
   current_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "")
   
@@ -367,7 +341,7 @@ configure_trim() {
 }
 
 # ============================================================================
-# Фаза 2: Безопасность (с обработкой ошибок IPv6)
+# Безопасность
 # ============================================================================
 
 configure_firewall() {
@@ -375,13 +349,11 @@ configure_firewall() {
   
   ensure_dependency "ufw" "ufw"
   
-  # Отключаем IPv6 если недоступен (частая проблема на VPS)
   if ! ip6tables -L &>/dev/null 2>&1; then
     print_warning "IPv6 недоступен, отключаем поддержку IPv6 в UFW"
     sed -i 's/^IPV6=yes/IPV6=no/' /etc/default/ufw 2>/dev/null || true
   fi
   
-  # Проверка текущего состояния
   if ufw status | grep -q "Status: active"; then
     print_info "UFW уже активен"
     return
@@ -393,11 +365,8 @@ configure_firewall() {
   ufw allow 80/tcp comment "HTTP (ACME/Caddy)" >/dev/null 2>&1
   ufw allow 443/tcp comment "HTTPS (Xray)" >/dev/null 2>&1
   
-  # Принудительное включение с подавлением ошибок IPv6
   if ! ufw --force enable >/dev/null 2>&1; then
-    if ! ufw enable 2>&1 | grep -v "ip6tables" >/dev/null 2>&1; then
-      print_warning "UFW активирован с ошибками IPv6 (игнорируем для VPS без IPv6)"
-    fi
+    ufw enable 2>&1 | grep -v "ip6tables" >/dev/null 2>&1 || true
   fi
   
   if ufw status | grep -q "Status: active"; then
@@ -412,7 +381,6 @@ configure_fail2ban() {
   
   ensure_dependency "fail2ban" "fail2ban-client"
   
-  # Проверка активности
   if systemctl is-active --quiet fail2ban 2>/dev/null; then
     print_info "Fail2Ban уже активен"
     return
@@ -440,7 +408,7 @@ EOF
 }
 
 # ============================================================================
-# Фаза 3: Сайт для маскировки трафика
+# Сайт для маскировки
 # ============================================================================
 
 create_masking_site() {
@@ -448,7 +416,6 @@ create_masking_site() {
   
   mkdir -p "$SITE_DIR"
   
-  # Профессиональный лендинг (минималистичный, быстрая загрузка)
   cat > "$SITE_DIR/index.html" <<'EOF_SITE'
 <!DOCTYPE html>
 <html lang="ru">
@@ -501,7 +468,6 @@ create_masking_site() {
 </html>
 EOF_SITE
 
-  # Дополнительные страницы для реалистичности
   mkdir -p "$SITE_DIR/about" "$SITE_DIR/contact"
   echo "<!DOCTYPE html><html lang='ru'><head><meta charset='UTF-8'><title>О нас</title></head><body><h1>О компании</h1><p>Профессиональные облачные услуги с 2021 года.</p><p><a href='/'>← На главную</a></p></body></html>" > "$SITE_DIR/about/index.html"
   echo "<!DOCTYPE html><html lang='ru'><head><meta charset='UTF-8'><title>Контакты</title></head><body><h1>Контакты</h1><p>Email: support@wishnu.duckdns.org</p><p><a href='/'>← На главную</a></p></body></html>" > "$SITE_DIR/contact/index.html"
@@ -516,13 +482,12 @@ EOF_SITE
 }
 
 # ============================================================================
-# Фаза 4: Установка и настройка Caddy (совместимая с v2.10.2)
+# Caddy
 # ============================================================================
 
 install_caddy() {
   print_substep "Установка веб-сервера Caddy"
   
-  # Остановка конфликтующих сервисов
   for svc in nginx apache2 httpd; do
     if systemctl is-active --quiet "$svc" 2>/dev/null; then
       print_info "Остановка конфликтующего сервиса: $svc"
@@ -531,18 +496,16 @@ install_caddy() {
     fi
   done
   
-  # Проверка существующей установки
   if command -v caddy &>/dev/null; then
     print_info "Caddy уже установлен (версия: $(caddy version 2>/dev/null | head -n1 | cut -d' ' -f1))"
     return
   fi
   
-  # Установка зависимостей (с правильными именами команд)
   ensure_dependency "debian-keyring" "-"
   ensure_dependency "debian-archive-keyring" "-"
   ensure_dependency "apt-transport-https" "-"
   ensure_dependency "curl" "curl"
-  ensure_dependency "gnupg" "gpg"  # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: команда = gpg, не gnupg
+  ensure_dependency "gnupg" "gpg"
   
   if [[ ! -f /usr/share/keyrings/caddy-stable-archive-keyring.gpg ]]; then
     curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
@@ -562,20 +525,16 @@ install_caddy() {
 configure_caddy() {
   print_substep "Настройка Caddy (схема steal-itself)"
   
-  # Критическая проверка: домен должен быть установлен
   if [[ -z "$DOMAIN" ]]; then
     print_error "Переменная DOMAIN не установлена. Укажите домен перед запуском скрипта."
   fi
   
-  # Очистка портов 80/443 от конфликтующих процессов
   free_ports
   
-  # Сохранение предыдущей конфигурации если существует
   if [[ -f "$CADDYFILE" ]]; then
     cp "$CADDYFILE" "${CADDYFILE}.backup-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
   fi
   
-  # Совместимая конфигурация для Caddy v2.10.2
   cat > "$CADDYFILE" <<EOF
 {
   admin off
@@ -587,7 +546,6 @@ configure_caddy() {
   }
 }
 
-# Публичный сайт для маскировки трафика
 ${DOMAIN} {
   root * ${SITE_DIR}
   file_server
@@ -597,7 +555,6 @@ ${DOMAIN} {
   }
 }
 
-# Fallback endpoint для невалидных XHTTP-запросов
 http://127.0.0.1:8001 {
   root * ${SITE_DIR}
   file_server
@@ -607,7 +564,6 @@ http://127.0.0.1:8001 {
 }
 EOF
   
-  # Валидация конфигурации
   print_info "Валидация конфигурации Caddy..."
   if ! caddy validate --config "$CADDYFILE" 2>&1; then
     print_error "Ошибка валидации Caddyfile. Проверьте синтаксис конфигурации."
@@ -619,7 +575,6 @@ EOF
   systemctl enable caddy --now >/dev/null 2>&1
   sleep 5
   
-  # Проверка статуса сервиса
   if systemctl is-active --quiet caddy; then
     print_success "Caddy запущен (порты 80/443 активны)"
   else
@@ -629,27 +584,25 @@ EOF
 }
 
 # ============================================================================
-# Фаза 5: Установка и настройка Xray (с надёжной загрузкой)
+# Xray (с правильным официальным установщиком)
 # ============================================================================
 
 install_xray() {
   print_substep "Установка Xray core"
   
-  # Проверка существующей установки
   if command -v xray &>/dev/null; then
     print_info "Xray уже установлен (версия: $(xray version 2>/dev/null | head -n1 || echo 'unknown'))"
     return
   fi
   
-  # Установка зависимостей
   ensure_dependency "curl" "curl"
   ensure_dependency "unzip" "unzip"
   
-  # Основной метод установки с повторными попытками
+  # Правильный официальный установщик из репозитория XTLS/Xray-install
   local install_success=false
   for attempt in {1..3}; do
     print_info "Попытка установки Xray (попытка ${attempt}/3)..."
-    if bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install --version 24.11.20 >/dev/null 2>&1; then
+    if bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1; then
       install_success=true
       break
     fi
@@ -659,12 +612,11 @@ install_xray() {
   if [[ "$install_success" == false ]]; then
     print_warning "Официальный установщик не сработал, используется резервный метод..."
     
-    # Получение последней версии из GitHub API
+    # Резервный метод: прямая загрузка последней версии
     local version
     version=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep -oP '"tag_name": "\Kv[^"]+' || echo "v1.8.5")
     print_info "Используется последняя версия: ${version}"
     
-    # Определение архитектуры
     local arch
     case "$(uname -m)" in
       x86_64)   arch="64" ;;
@@ -673,12 +625,10 @@ install_xray() {
       *) print_error "Неподдерживаемая архитектура: $(uname -m)" ;;
     esac
     
-    # Создание временной директории
     local tmp_dir
     tmp_dir=$(mktemp -d)
     cd "$tmp_dir"
     
-    # Надёжная загрузка с повторными попытками
     local download_success=false
     for attempt in {1..5}; do
       print_info "Загрузка Xray ${version} (попытка ${attempt}/5)..."
@@ -692,8 +642,7 @@ install_xray() {
     done
     
     if [[ "$download_success" == false ]]; then
-      # Резервный источник (зеркало)
-      print_warning "Основной источник недоступен, пробуем зеркало..."
+      print_info "Пробуем альтернативный источник..."
       if curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 \
         "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${arch}.zip" \
         -o xray.zip; then
@@ -706,12 +655,10 @@ install_xray() {
       print_error "Не удалось загрузить Xray после 5 попыток. Проверьте сетевое подключение."
     fi
     
-    # Распаковка и установка
     unzip -o xray.zip xray >/dev/null 2>&1
     install -m 755 xray /usr/local/bin/
     rm -rf "$tmp_dir"
     
-    # Создание системного пользователя
     id xray &>/dev/null || useradd -s /usr/sbin/nologin -r -d /usr/local/etc/xray xray
     
     print_success "Xray установлен вручную (версия: ${version})"
@@ -725,7 +672,6 @@ generate_xray_config() {
   
   mkdir -p /usr/local/etc/xray
   
-  # Загрузка существующих параметров если есть
   local secret_path uuid priv_key pub_key short_id
   
   if [[ -f "$XRAY_KEYS" ]]; then
@@ -736,7 +682,6 @@ generate_xray_config() {
     pub_key=$(grep "^public_key:" "$XRAY_KEYS" | awk '{print $2}')
     short_id=$(grep "^short_id:" "$XRAY_KEYS" | awk '{print $2}')
   else
-    # Генерация новых параметров
     secret_path=$(tr -dc 'a-z0-9' < /dev/urandom | head -c 8)
     uuid=$(cat /proc/sys/kernel/random/uuid)
     local key_pair
@@ -745,7 +690,6 @@ generate_xray_config() {
     pub_key=$(echo "$key_pair" | grep -i "public" | awk '{print $NF}')
     short_id=$(openssl rand -hex 4)
     
-    # Сохранение параметров
     {
       echo "path: /${secret_path}"
       echo "uuid: ${uuid}"
@@ -761,7 +705,6 @@ generate_xray_config() {
   print_info "UUID: ${uuid:0:8}..."
   print_info "ShortID: ${short_id}"
   
-  # Создание конфигурации Xray
   cat > "$XRAY_CONFIG" <<EOF
 {
   "log": {
@@ -848,7 +791,6 @@ EOF
   chown -R xray:xray /usr/local/etc/xray 2>/dev/null || true
   chmod 644 "$XRAY_CONFIG"
   
-  # Валидация конфигурации перед запуском
   print_info "Валидация конфигурации Xray..."
   if ! xray test --config "$XRAY_CONFIG" 2>&1; then
     print_error "Ошибка валидации конфигурации Xray. Проверьте синтаксис."
@@ -856,7 +798,6 @@ EOF
   
   print_success "Конфигурация Xray валидна"
   
-  # Перезапуск сервиса
   if systemctl is-active --quiet xray 2>/dev/null; then
     systemctl restart xray >/dev/null 2>&1
   else
@@ -865,7 +806,6 @@ EOF
   
   sleep 5
   
-  # Проверка статуса сервиса
   if systemctl is-active --quiet xray; then
     print_success "Xray запущен"
   else
@@ -875,13 +815,12 @@ EOF
 }
 
 # ============================================================================
-# Фаза 6: Утилита управления пользователями
+# Утилита управления пользователями
 # ============================================================================
 
 create_user_utility() {
   print_substep "Создание утилиты управления пользователями"
   
-  # Установка зависимостей для утилиты
   ensure_dependency "qrencode" "qrencode"
   
   cat > /usr/local/bin/user <<'EOF_SCRIPT'
@@ -1050,62 +989,51 @@ main() {
   
   check_root
   
-  # Фаза 1: Системные оптимизации (без домена)
   print_step "Системные оптимизации"
   optimize_swap
   optimize_network
   configure_trim
   
-  # Фаза 2: Запрос домена (работает в интерактивном и неинтерактивном режимах)
   prompt_domain
   
-  # Фаза 3: Безопасность
   print_step "Безопасность системы"
   configure_firewall
   configure_fail2ban
   
-  # Фаза 4: Зависимости (без интерактивных запросов)
   print_step "Установка зависимостей"
   export DEBIAN_FRONTEND=noninteractive
   
-  # Обновление списка пакетов с таймаутом
   timeout 30 apt-get update >/dev/null 2>&1 || {
     print_warning "Не удалось обновить список пакетов, продолжаем с текущим кэшем"
   }
   
-  # Установка критических зависимостей с правильными именами команд
   ensure_dependency "curl" "curl"
   ensure_dependency "jq" "jq"
   ensure_dependency "socat" "socat"
   ensure_dependency "git" "git"
   ensure_dependency "wget" "wget"
-  ensure_dependency "gnupg" "gpg"  # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ
+  ensure_dependency "gnupg" "gpg"
   ensure_dependency "ca-certificates" "update-ca-certificates"
   ensure_dependency "unzip" "unzip"
-  ensure_dependency "iproute2" "ss"  # Для диагностики портов
+  ensure_dependency "iproute2" "ss"
   
   print_success "Все зависимости установлены"
   
-  # Фаза 5: Сайт для маскировки
   print_step "Сайт для маскировки трафика"
   create_masking_site
   
-  # Фаза 6: Caddy
   print_step "Веб-сервер Caddy"
   install_caddy
   configure_caddy
   
-  # Фаза 7: Xray
   print_step "Xray Core"
   install_xray
   generate_xray_config
   
-  # Фаза 8: Утилиты управления
   print_step "Утилиты управления"
   create_user_utility
   create_help_file
   
-  # Финальный вывод
   echo -e "\n${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
   echo -e "${BOLD}${SOFT_GREEN}Установка завершена успешно${RESET}"
   echo -e "${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
