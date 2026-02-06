@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ============================================================================
 # Xray VLESS/XHTTP/Reality Installer
-# Только официальная генерация ключей + новый UUID при каждой установке
+# Реальный вывод установки + новый UUID при каждой установке
 # ============================================================================
 
 # =============== ЦВЕТОВАЯ СХЕМА ===============
@@ -37,34 +37,8 @@ print_info() { echo -e "${LIGHT_GRAY}ℹ${RESET} ${1}"; }
 print_substep() { echo -e "${MEDIUM_GRAY}  →${RESET} ${1}"; }
 
 # ============================================================================
-# ВИЗУАЛЬНЫЙ ОБРАТНЫЙ ОТСЧЁТ
+# ВИЗУАЛЬНЫЙ ОБРАТНЫЙ ОТСЧЁТ (ТОЛЬКО ДЛЯ КРИТИЧЕСКИХ ОПЕРАЦИЙ)
 # ============================================================================
-countdown() {
-  local seconds="$1"
-  local label="${2:-Операция}"
-  local start_time=$(date +%s)
-  local end_time=$((start_time + seconds))
-  
-  echo -ne "${LIGHT_GRAY}${label}...${RESET}"
-  while true; do
-    local now=$(date +%s)
-    local remaining=$((end_time - now))
-    
-    if [[ $remaining -le 0 ]]; then
-      echo -e " ${SOFT_GREEN}✓${RESET}"
-      return 0
-    fi
-    
-    # Анимация точек для обратного отсчёта
-    local dots=$(( (seconds - remaining) % 4 ))
-    local dot_str=""
-    for ((i=0; i<dots; i++)); do dot_str+="."; done
-    
-    echo -ne "\r${LIGHT_GRAY}${label}${dot_str} (${remaining}s)${RESET}"
-    sleep 0.5
-  done
-}
-
 countdown_with_spinner() {
   local seconds="$1"
   local label="${2:-Операция}"
@@ -197,7 +171,7 @@ validate_and_set_domain() {
 }
 
 # ============================================================================
-# Установка haveged с обратным отсчётом
+# Установка haveged БЕЗ таймаутов — реальный вывод процесса
 # ============================================================================
 ensure_entropy() {
   print_substep "Проверка энтропии"
@@ -210,36 +184,29 @@ ensure_entropy() {
   if [[ "$entropy_avail" -lt 200 ]]; then
     print_warning "Низкая энтропия (< 200). Устанавливаем haveged..."
     
-    # Обновление с таймаутом 20 сек
-    if ! timeout 20 apt-get update >/dev/null 2>&1; then
-      print_warning "apt update завершился с таймаутом, продолжаем"
-    fi
+    echo -e "${MEDIUM_GRAY}Выполняется: apt-get update${RESET}"
+    apt-get update -qq 2>&1 | grep -E "(Hit|Get|Ign)" | sed 's/^/  /' || true
     
-    # Установка haveged с таймаутом 25 сек
-    countdown_with_spinner 25 "Установка haveged"
-    if ! timeout 25 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends haveged >/dev/null 2>&1; then
+    echo -e "${MEDIUM_GRAY}Выполняется: apt-get install haveged${RESET}"
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends haveged 2>&1 | grep -E "(Setting up|Unpacking)" | sed 's/^/  /'; then
       print_error "Не удалось установить haveged. Проверьте сетевое подключение."
     fi
     
     systemctl enable haveged --now >/dev/null 2>&1 || true
     print_success "haveged установлен и активирован"
     
-    # Ожидание накопления энтропии с обратным отсчётом
-    countdown 5 "Накопление энтропии"
+    # Короткое ожидание для накопления энтропии
+    sleep 2
     
     entropy_avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo 0)
     print_info "Энтропия после haveged: ${entropy_avail}"
-    
-    if [[ "$entropy_avail" -lt 100 ]]; then
-      print_warning "Энтропия всё ещё низкая (${entropy_avail}). Продолжаем с риском."
-    fi
   else
     print_success "Энтропия достаточна (${entropy_avail})"
   fi
 }
 
 # ============================================================================
-# Установка зависимостей с уменьшенными таймаутами
+# УСТАНОВКА ЗАВИСИМОСТЕЙ БЕЗ ТАЙМАУТОВ — РЕАЛЬНЫЙ ВЫВОД
 # ============================================================================
 ensure_dependency() {
   local pkg="$1"
@@ -259,19 +226,16 @@ ensure_dependency() {
   
   print_info "Установка: ${pkg}..."
   
-  # Таймаут уменьшен до 120 секунд
-  if ! timeout 120 sh -c "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold' ${pkg} >/dev/null 2>&1"; then
-    print_error "Не удалось установить ${pkg}. Проверьте сетевое подключение."
+  # Реальный вывод установки (только ключевые этапы)
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$pkg" 2>&1 | grep -E "(Setting up|Unpacking|Preparing to unpack)" | sed 's/^/  /'; then
+    print_error "Не удалось установить ${pkg}. Проверьте:
+  • Сетевое подключение: ping -c 3 deb.debian.org
+  • Зеркала apt: cat /etc/apt/sources.list
+  • Место на диске: df -h /"
   fi
   
   # Проверка установки
   if [[ "$cmd" != "-" ]]; then
-    local attempts=0
-    while ! command -v "$cmd" &>/dev/null && [[ $attempts -lt 3 ]]; do
-      sleep 1
-      ((attempts++))
-    done
-    
     if ! command -v "$cmd" &>/dev/null; then
       print_error "После установки ${pkg} команда '${cmd}' недоступна"
     fi
@@ -427,7 +391,7 @@ configure_trim() {
 }
 
 # ============================================================================
-# Безопасность (с уменьшенными таймаутами)
+# Безопасность (без таймаутов)
 # ============================================================================
 
 configure_firewall() {
@@ -451,8 +415,9 @@ configure_firewall() {
   ufw allow 80/tcp comment "HTTP (ACME/Caddy)" >/dev/null 2>&1
   ufw allow 443/tcp comment "HTTPS (Xray)" >/dev/null 2>&1
   
-  # Таймаут уменьшен до 10 сек
-  if ! timeout 10 ufw --force enable >/dev/null 2>&1; then
+  # Без таймаута — реальный вывод
+  echo -e "${MEDIUM_GRAY}Выполняется: ufw --force enable${RESET}"
+  if ! ufw --force enable 2>&1 | grep -v "ip6tables" | sed 's/^/  /'; then
     print_warning "UFW активирован с предупреждениями"
   fi
   
@@ -486,10 +451,7 @@ ignoreip = 127.0.0.1/8 ::1
 EOF
   
   systemctl enable fail2ban >/dev/null 2>&1 || true
-  # Таймаут уменьшен до 8 сек
-  if ! timeout 8 systemctl start fail2ban >/dev/null 2>&1; then
-    print_warning "Fail2Ban запущен в фоне"
-  fi
+  systemctl start fail2ban >/dev/null 2>&1 || true
   
   sleep 1
   
@@ -610,8 +572,13 @@ install_caddy() {
       > /etc/apt/sources.list.d/caddy-stable.list
   fi
   
-  timeout 25 apt-get update >/dev/null 2>&1 || print_warning "apt update завершился с ошибкой, продолжаем"
-  timeout 90 apt-get install -y caddy >/dev/null 2>&1 || print_error "Не удалось установить Caddy"
+  echo -e "${MEDIUM_GRAY}Выполняется: apt-get update (Caddy)${RESET}"
+  apt-get update -qq 2>&1 | grep -E "(Hit|Get|Ign)" | sed 's/^/  /' || true
+  
+  echo -e "${MEDIUM_GRAY}Выполняется: apt-get install caddy${RESET}"
+  if ! apt-get install -y caddy 2>&1 | grep -E "(Setting up|Unpacking)" | sed 's/^/  /'; then
+    print_error "Не удалось установить Caddy"
+  fi
   
   print_success "Caddy установлен (версия: $(caddy version 2>/dev/null | head -n1 | cut -d' ' -f1))"
 }
@@ -694,16 +661,14 @@ install_xray() {
   ensure_dependency "curl" "curl"
   
   print_info "Загрузка официального установщика Xray..."
-  # Таймаут уменьшен до 45 сек
-  if ! timeout 45 bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1; then
+  if ! bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install 2>&1 | grep -E "(installed|success)" | head -n1; then
     print_error "Не удалось установить Xray официальным установщиком. Проверьте сетевое подключение."
   fi
   
   print_info "Установка геофайлов (geoip.dat, geosite.dat)..."
-  # Таймаут уменьшен до 45 сек
-  if ! timeout 45 bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata >/dev/null 2>&1; then
+  if ! bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata 2>&1 | grep -E "(installed|success)" | head -n1; then
     print_warning "Не удалось установить геофайлы. Попытка повторной установки..."
-    timeout 45 bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata || true
+    bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata || true
   fi
   
   local version
@@ -725,7 +690,6 @@ generate_xray_config() {
   
   # ============================================================================
   # ВАЖНО: ВСЕГДА ГЕНЕРИРУЕМ НОВЫЕ ПАРАМЕТРЫ ПРИ УСТАНОВКЕ
-  # (даже если файлы существуют — это чистая переустановка)
   # ============================================================================
   
   secret_path=$(tr -dc 'a-z0-9' < /dev/urandom | head -c 8)
@@ -738,13 +702,17 @@ generate_xray_config() {
   # ГЕНЕРАЦИЯ КЛЮЧЕЙ ТОЛЬКО ЧЕРЕЗ xray x25519 (без резервных ключей!)
   # ============================================================================
   
-  print_info "Генерация X25519 ключей (таймаут: 15 секунд)..."
+  print_info "Генерация X25519 ключей (таймаут: 20 секунд)..."
   
   local key_pair
-  # Таймаут уменьшен до 15 секунд с визуальным отсчётом
-  if ! countdown_with_spinner 15 "Генерация ключей Reality" && ! key_pair=$(timeout 15 xray x25519 2>&1); then
-    print_error "Генерация ключей превысила таймаут (15 сек). Решение:
-  sudo apt install haveged && sudo systemctl start haveged
+  # Таймаут ТОЛЬКО для генерации ключей (критическая операция)
+  if ! countdown_with_spinner 20 "Генерация ключей Reality" && ! key_pair=$(timeout 20 xray x25519 2>&1); then
+    print_error "Генерация ключей превысила таймаут (20 сек). Возможные причины:
+  1. Недостаточно энтропии в системе
+  2. Проблемы с /dev/random
+  
+Решение:
+  sudo apt install haveged && sudo systemctl start haveged && sleep 5
   Затем повторите установку скрипта."
   fi
   
@@ -1167,7 +1135,7 @@ main() {
   check_root
   
   # ============================================================================
-  # УСТАНОВКА HAVEGED С ОБРАТНЫМ ОТСЧЁТОМ
+  # УСТАНОВКА HAVEGED С РЕАЛЬНЫМ ВЫВОДОМ
   # ============================================================================
   print_step "Подготовка системы (энтропия)"
   ensure_entropy
@@ -1189,11 +1157,9 @@ main() {
   
   print_step "Установка зависимостей"
   
-  # Обновление списка пакетов с таймаутом 25 сек
-  countdown_with_spinner 25 "Обновление списка пакетов"
-  if ! timeout 25 apt-get update >/dev/null 2>&1; then
-    print_warning "apt update завершился с таймаутом, продолжаем с текущим кэшем"
-  fi
+  # Обновление списка пакетов с реальным выводом
+  echo -e "${MEDIUM_GRAY}Выполняется: apt-get update${RESET}"
+  apt-get update -qq 2>&1 | grep -E "(Hit|Get|Ign)" | sed 's/^/  /' || true
   
   ensure_dependency "curl" "curl"
   ensure_dependency "jq" "jq"
@@ -1256,6 +1222,13 @@ main() {
   echo -e "${SOFT_YELLOW}⚠${RESET} SSL-сертификат будет автоматически получен при первом обращении к ${BOLD}https://${DOMAIN}${RESET}"
   echo
   echo -e "${LIGHT_GRAY}Лог установки: ${LOG_FILE}${RESET}"
+  echo
+  
+  echo -e "${SOFT_GREEN}✓${RESET} ${BOLD}Установка завершена!${RESET} Для диагностики проблем проверьте:"
+  echo -e "  • Сетевое подключение: ${MEDIUM_GRAY}ping -c 3 8.8.8.8${RESET}"
+  echo -e "  • Статус Xray:         ${MEDIUM_GRAY}systemctl status xray${RESET}"
+  echo -e "  • Логи Xray:           ${MEDIUM_GRAY}journalctl -u xray -f${RESET}"
+  echo -e "  • Полный лог установки:${MEDIUM_GRAY} cat ${LOG_FILE}${RESET}"
   echo
 }
 
