@@ -586,7 +586,10 @@ install_xray() {
   print_substep "Установка Xray core (официальный установщик)"
   
   if command -v xray &>/dev/null; then
-    print_info "Xray уже установлен (версия: $(xray version 2>/dev/null | head -n1 || echo 'unknown'))"
+    # Корректное получение версии (без лишних строк)
+    local version
+    version=$(xray version 2>/dev/null | head -n1 | cut -d' ' -f1-3 || echo "unknown")
+    print_info "Xray уже установлен (версия: ${version})"
     return
   fi
   
@@ -605,7 +608,10 @@ install_xray() {
     bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata || true
   fi
   
-  print_success "Xray установлен (версия: $(xray version 2>/dev/null | head -n1 || echo 'unknown'))"
+  # Корректное получение версии после установки
+  local version
+  version=$(xray version 2>/dev/null | head -n1 | cut -d' ' -f1-3 || echo "unknown")
+  print_success "Xray установлен (версия: ${version})"
 }
 
 generate_xray_config() {
