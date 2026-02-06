@@ -6,8 +6,6 @@
 ├── favicon.ico
 ├── about/
 │   └── index.html
-├── services/
-│   └── index.html
 └── contact/
     └── index.html
 ```
