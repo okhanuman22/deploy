@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ============================================================================
 # Xray VLESS/XHTTP/Reality Installer
-# Минималистичный • Без избыточных проверок энтропии • Идемпотентный
+# Официальная генерация UUID • Правильная валидация • Минималистичный
 # ============================================================================
 
 # =============== ЦВЕТОВАЯ СХЕМА ===============
@@ -37,7 +37,7 @@ print_info() { echo -e "${LIGHT_GRAY}ℹ${RESET} ${1}"; }
 print_substep() { echo -e "${MEDIUM_GRAY}  →${RESET} ${1}"; }
 
 # ============================================================================
-# МИНИМАЛИСТИЧНЫЙ СПИННЕР (без избыточной сложности)
+# МИНИМАЛИСТИЧНЫЙ СПИННЕР
 # ============================================================================
 run_with_spinner() {
   local cmd="$1"
@@ -132,7 +132,7 @@ get_public_ip() {
 }
 
 # ============================================================================
-# ОБНОВЛЕНИЕ СИСТЕМЫ (без избыточных проверок)
+# ОБНОВЛЕНИЕ СИСТЕМЫ
 # ============================================================================
 update_system() {
   print_step "Обновление системы"
@@ -154,7 +154,7 @@ update_system() {
 }
 
 # ============================================================================
-# ОПТИМИЗАЦИИ (без избыточной энтропии)
+# ОПТИМИЗАЦИЯ SWAP
 # ============================================================================
 optimize_swap() {
   print_substep "Swap"
@@ -184,6 +184,9 @@ optimize_swap() {
   print_success "Swap активен"
 }
 
+# ============================================================================
+# ОПТИМИЗАЦИЯ СЕТИ (BBR)
+# ============================================================================
 optimize_network() {
   print_substep "Сеть (BBR)"
   
@@ -221,6 +224,9 @@ EOF
   print_success "BBR активен"
 }
 
+# ============================================================================
+# ОПТИМИЗАЦИЯ SSD (TRIM)
+# ============================================================================
 configure_trim() {
   print_substep "TRIM (SSD)"
   
@@ -240,7 +246,7 @@ configure_trim() {
 }
 
 # ============================================================================
-# БЕЗОПАСНОСТЬ
+# ФАЕРВОЛ (UFW)
 # ============================================================================
 configure_firewall() {
   print_substep "Фаервол (UFW)"
@@ -274,6 +280,9 @@ configure_firewall() {
   print_success "UFW активен"
 }
 
+# ============================================================================
+# FAIL2BAN
+# ============================================================================
 configure_fail2ban() {
   print_substep "Fail2Ban"
   
@@ -302,7 +311,89 @@ EOF
 }
 
 # ============================================================================
-# МАСКИРОВОЧНЫЙ САЙТ (одна страница)
+# НАДЕЖНАЯ ПРОВЕРКА ДОМЕНА
+# ============================================================================
+prompt_domain() {
+  print_step "Домен"
+  
+  if [[ -n "$DOMAIN" ]]; then
+    validate_and_set_domain "$DOMAIN"
+    return
+  fi
+  
+  if [[ -f "$XRAY_CONFIG" ]] && command -v jq &>/dev/null; then
+    local existing_domain
+    existing_domain=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0] // ""' "$XRAY_CONFIG" 2>/dev/null || echo "")
+    
+    if [[ -n "$existing_domain" && "$existing_domain" != "null" && "$existing_domain" != "example.com" && "$existing_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
+      DOMAIN="$existing_domain"
+      SERVER_IP=$(get_public_ip)
+      print_info "Используется домен из конфигурации: ${DOMAIN}"
+      return
+    fi
+  fi
+  
+  echo -e "${BOLD}Введите домен${RESET} (пример: wishnu.duckdns.org)"
+  echo -e "${LIGHT_GRAY}Домен должен быть привязан к IP-адресу этого сервера${RESET}"
+  
+  local input_domain=""
+  if ! read -r input_domain < /dev/tty 2>/dev/null; then
+    print_error "Не удалось прочитать домен из терминала"
+  fi
+  
+  input_domain=$(echo "$input_domain" | tr -d '[:space:]')
+  
+  if [[ -z "$input_domain" ]]; then
+    print_error "Домен не может быть пустым"
+  fi
+  
+  if [[ ! "$input_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
+    print_error "Неверный формат домена (пример: ваш-домен.duckdns.org)"
+  fi
+  
+  validate_and_set_domain "$input_domain"
+}
+
+validate_and_set_domain() {
+  local input_domain="$1"
+  
+  if [[ ! "$input_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
+    print_error "Неверный формат домена: ${input_domain}"
+  fi
+  
+  local ipv4
+  ipv4=$(host -t A "$input_domain" 2>/dev/null | awk '/has address/ {print $4; exit}' || echo "")
+  
+  if [[ -n "$ipv4" ]]; then
+    print_success "DNS A-запись найдена: ${ipv4}"
+  else
+    local confirm=""
+    echo -e "${SOFT_YELLOW}⚠${RESET} DNS для ${BOLD}${input_domain}${RESET} не найден."
+    if read -p "Продолжить без проверки DNS? [y/N]: " confirm < /dev/tty 2>/dev/null; then
+      [[ ! "$confirm" =~ ^[Yy]$ ]] && print_error "Установка прервана"
+    else
+      print_warning "DNS не найден (продолжаем без проверки)"
+    fi
+  fi
+  
+  SERVER_IP=$(get_public_ip)
+  if [[ -n "$ipv4" && "$ipv4" != "$SERVER_IP" ]]; then
+    local confirm=""
+    echo -e "${SOFT_YELLOW}⚠${RESET} DNS (${ipv4}) ≠ IP сервера (${SERVER_IP})."
+    if read -p "Продолжить с несоответствующим DNS? [y/N]: " confirm < /dev/tty 2>/dev/null; then
+      [[ ! "$confirm" =~ ^[Yy]$ ]] && print_error "Установка прервана"
+    else
+      print_warning "DNS не соответствует IP сервера (продолжаем)"
+    fi
+  fi
+  
+  DOMAIN="$input_domain"
+  print_success "Домен: ${DOMAIN}"
+  print_info "IP-адрес сервера: ${SERVER_IP}"
+}
+
+# ============================================================================
+# МАСКИРОВОЧНЫЙ САЙТ
 # ============================================================================
 create_masking_site() {
   print_substep "Маскировочный сайт"
@@ -421,7 +512,7 @@ EOF_SITE
 }
 
 # ============================================================================
-# CADDY (корректный маппинг пакетов)
+# УСТАНОВКА CADDY
 # ============================================================================
 install_caddy() {
   print_substep "Caddy"
@@ -436,7 +527,6 @@ install_caddy() {
   command -v caddy &>/dev/null && \
     { print_info "✓ Уже установлен ($(caddy version | head -n1 | cut -d' ' -f1))"; return 0; }
   
-  # КОРРЕКТНЫЙ МАППИНГ ПАКЕТОВ
   ensure_dependency "debian-keyring" "-"
   ensure_dependency "debian-archive-keyring" "-"
   ensure_dependency "apt-transport-https" "-"
@@ -502,56 +592,65 @@ EOF
 }
 
 # ============================================================================
-# ДОМЕН
-# ============================================================================
-prompt_domain() {
-  print_step "Домен"
-  
-  [[ -n "$DOMAIN" ]] && { validate_and_set_domain "$DOMAIN"; return; }
-  
-  [[ -f "$XRAY_CONFIG" && $(command -v jq &>/dev/null && jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0] // empty' "$XRAY_CONFIG" 2>/dev/null || echo "") != "null" ]] && \
-    { DOMAIN=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0]' "$XRAY_CONFIG" 2>/dev/null); SERVER_IP=$(get_public_ip); print_info "Используется домен из конфигурации: ${DOMAIN}"; return; }
-  
-  echo -e "${BOLD}Домен${RESET} (wishnu.duckdns.org):"
-  read -r DOMAIN < /dev/tty
-  DOMAIN=$(echo "$DOMAIN" | tr -d '[:space:]')
-  [[ -z "$DOMAIN" || ! "$DOMAIN" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]] && print_error "Неверный формат домена"
-  
-  validate_and_set_domain "$DOMAIN"
-}
-
-validate_and_set_domain() {
-  local input_domain="$1"
-  local ipv4=$(host -t A "$input_domain" 2>/dev/null | awk '/has address/ {print $4; exit}' || echo "")
-  
-  [[ -z "$ipv4" ]] && { read -p "DNS не найден. Продолжить? [y/N]: " c < /dev/tty; [[ ! "$c" =~ ^[Yy]$ ]] && exit 1; }
-  
-  SERVER_IP=$(get_public_ip)
-  [[ -n "$ipv4" && "$ipv4" != "$SERVER_IP" ]] && { read -p "DNS (${ipv4}) ≠ IP (${SERVER_IP}). Продолжить? [y/N]: " c < /dev/tty; [[ ! "$c" =~ ^[Yy]$ ]] && exit 1; }
-  
-  DOMAIN="$input_domain"
-  print_success "Домен: ${DOMAIN} → ${SERVER_IP}"
-}
-
-# ============================================================================
-# XRAY (без избыточной энтропии)
+# УСТАНОВКА XRAY
 # ============================================================================
 install_xray() {
   print_substep "Xray Core"
   
-  command -v xray &>/dev/null && \
-    { print_info "✓ Уже установлен ($(xray version | head -n1 | cut -d' ' -f1-3))"; return 0; }
+  if command -v xray &>/dev/null; then
+    local version
+    version=$(xray version 2>/dev/null | head -n1 | cut -d' ' -f1-3 || echo "unknown")
+    print_info "✓ Уже установлен (${version})"
+    return 0
+  fi
   
   ensure_dependency "curl" "curl"
   
-  bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install &>/dev/null || \
+  if ! bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install &>/dev/null; then
     print_error "Не удалось установить Xray"
+  fi
   
-  bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata &>/dev/null || true
+  if ! bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata &>/dev/null; then
+    print_warning "Не удалось установить геофайлы (повторная попытка)..."
+    bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata &>/dev/null || true
+  fi
   
-  print_success "Xray установлен ($(xray version | head -n1 | cut -d' ' -f1-3))"
+  local version
+  version=$(xray version 2>/dev/null | head -n1 | cut -d' ' -f1-3 || echo "unknown")
+  print_success "Xray установлен (${version})"
 }
 
+# ============================================================================
+# ГЕНЕРАЦИЯ UUID ЧЕРЕЗ ОФИЦИАЛЬНУЮ КОМАНДУ
+# ============================================================================
+generate_uuid() {
+  local uuid
+  
+  # Используем ТОЛЬКО официальную команду с таймаутом 15 сек
+  if ! uuid=$(timeout 15 xray uuid 2>/dev/null); then
+    print_error "Генерация UUID превысила 15 секунд.
+  
+Решение:
+  1. Убедитесь, что Xray установлен: xray version
+  2. Проверьте права: ls -la /usr/local/bin/xray
+  3. Попробуйте вручную: sudo xray uuid"
+  fi
+  
+  # Валидация UUID по формату RFC 4122
+  if [[ -z "$uuid" || ! "$uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+    print_error "Некорректный UUID от 'xray uuid': '$uuid'
+  
+Диагностика:
+  • Проверьте вывод: xray uuid
+  • Убедитесь, что используется Xray ≥ v1.8.0"
+  fi
+  
+  echo "$uuid"
+}
+
+# ============================================================================
+# ГЕНЕРАЦИЯ КОНФИГУРАЦИИ
+# ============================================================================
 generate_xray_config() {
   print_substep "Генерация конфигурации"
   
@@ -560,37 +659,42 @@ generate_xray_config() {
   local secret_path uuid priv_key pub_key short_id
   
   if [[ -f "$XRAY_KEYS" ]]; then
-    secret_path=$(grep "^path:" "$XRAY_KEYS" | awk '{print $2}' | sed 's|/||')
-    uuid=$(grep "^uuid:" "$XRAY_KEYS" | awk '{print $2}')
-    priv_key=$(grep "^private_key:" "$XRAY_KEYS" | awk '{print $2}')
-    pub_key=$(grep "^public_key:" "$XRAY_KEYS" | awk '{print $2}')
-    short_id=$(grep "^short_id:" "$XRAY_KEYS" | awk '{print $2}')
-    print_info "Используются существующие параметры"
-  else
-    # ГЕНЕРАЦИЯ СЕКРЕТНОГО ПУТИ
+    secret_path=$(grep "^path:" "$XRAY_KEYS" | awk '{print $2}' | sed 's|/||' 2>/dev/null || echo "")
+    uuid=$(grep "^uuid:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "")
+    priv_key=$(grep "^private_key:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "")
+    pub_key=$(grep "^public_key:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "")
+    short_id=$(grep "^short_id:" "$XRAY_KEYS" | awk '{print $2}' 2>/dev/null || echo "")
+    
+    if [[ -n "$secret_path" && -n "$uuid" && -n "$priv_key" && -n "$pub_key" && -n "$short_id" ]]; then
+      print_info "Используются существующие параметры из ${XRAY_KEYS}"
+    else
+      print_warning "Неполные параметры в ${XRAY_KEYS}, генерируем новые"
+      rm -f "$XRAY_KEYS"
+    fi
+  fi
+  
+  if [[ ! -f "$XRAY_KEYS" || ! -s "$XRAY_KEYS" ]]; then
     secret_path=$(tr -dc 'a-z0-9' < /dev/urandom | head -c 8)
     
-    # ============================================================================
-    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: НЕБЛОКИРУЮЩАЯ ГЕНЕРАЦИЯ UUID
-    # ============================================================================
-    ensure_dependency "uuid-runtime" "uuidgen"  # ← Единственная необходимая зависимость для UUID
-    
-    uuid=$(uuidgen)  # ← НЕ БЛОКИРУЕТСЯ, использует /dev/urandom
+    # Генерация UUID через официальную команду
+    print_info "Генерация UUID через 'xray uuid'..."
+    uuid=$(generate_uuid)
     print_success "UUID сгенерирован: ${uuid:0:8}..."
     
-    # ГЕНЕРАЦИЯ КЛЮЧЕЙ (современные версии Xray не блокируются)
+    # Генерация ключей Reality
     print_info "Генерация X25519 ключей..."
     local key_pair
     key_pair=$(xray x25519 2>&1) || \
-      print_error "Не удалось сгенерировать ключи. Убедитесь, что установлены все зависимости."
+      print_error "Не удалось сгенерировать ключи Reality"
     
-    priv_key=$(echo "$key_pair" | grep -i "^PrivateKey" | awk '{print $NF}')
-    pub_key=$(echo "$key_pair" | grep -i "^Password" | awk '{print $NF}')
+    priv_key=$(echo "$key_pair" | grep -i "^PrivateKey" | awk '{print $NF}' | head -n1)
+    pub_key=$(echo "$key_pair" | grep -i "^Password" | awk '{print $NF}' | head -n1)
     
-    [[ -z "$priv_key" || -z "$pub_key" || "${#priv_key}" -lt 40 || "${#pub_key}" -lt 40 ]] && \
-      print_error "Некорректные ключи"
+    if [[ -z "$priv_key" || -z "$pub_key" || "${#priv_key}" -lt 40 || "${#pub_key}" -lt 40 ]]; then
+      print_error "Некорректные ключи Reality"
+    fi
     
-    short_id=$(openssl rand -hex 4)
+    short_id=$(openssl rand -hex 4 2>/dev/null || echo "a1b2c3d4")
     
     {
       echo "path: /${secret_path}"
@@ -602,6 +706,10 @@ generate_xray_config() {
     chmod 600 "$XRAY_KEYS"
     
     print_success "Сгенерированы новые параметры"
+  fi
+  
+  if [[ -z "$secret_path" || -z "$uuid" || -z "$priv_key" || -z "$pub_key" || -z "$short_id" ]]; then
+    print_error "Отсутствуют критические параметры"
   fi
   
   # Генерация конфигурации
@@ -661,16 +769,31 @@ EOF
   chown -R www-www-data /usr/local/etc/xray 2>/dev/null || true
   chmod 644 "$XRAY_CONFIG"
   
-  xray test --config "$XRAY_CONFIG" &>/dev/null || \
-    print_error "Ошибка валидации Xray"
+  # ПРАВИЛЬНАЯ ВАЛИДАЦИЯ
+  print_info "Валидация конфигурации Xray..."
+  if ! xray run -test -c "$XRAY_CONFIG" &>/dev/null; then
+    xray run -test -c "$XRAY_CONFIG" 2>&1 | tee -a "$LOG_FILE"
+    print_error "Ошибка валидации конфигурации Xray"
+  fi
   
-  systemctl is-active --quiet xray 2>/dev/null && systemctl restart xray &>/dev/null || \
-    systemctl enable xray --now &>/dev/null
+  print_success "Конфигурация Xray валидна"
+  
+  # Запуск Xray
+  if systemctl is-active --quiet xray 2>/dev/null; then
+    systemctl restart xray &>/dev/null || \
+      print_error "Не удалось перезапустить Xray"
+  else
+    systemctl enable xray --now &>/dev/null || \
+      print_error "Не удалось запустить Xray"
+  fi
   
   sleep 3
   
-  systemctl is-active --quiet xray && print_success "Xray запущен" || \
+  if systemctl is-active --quiet xray; then
+    print_success "Xray запущен"
+  else
     print_error "Не удалось запустить Xray"
+  fi
 }
 
 # ============================================================================
@@ -763,7 +886,7 @@ generate_link() {
 case "$ACTION" in
   list) jq -r '.inbounds[0].settings.clients[] | "\(.email) (\(.id))"' "$XRAY_CONFIG" 2>/dev/null | nl -w3 -s'. ' || echo "Нет клиентов" ;;
   qr) uuid=$(jq -r '.inbounds[0].settings.clients[] | select(.email=="main") | .id' "$XRAY_CONFIG" 2>/dev/null || echo ""); [[ -z "$uuid" ]] && exit 1; link=$(generate_link "$uuid" "main"); echo -e "\nСсылка:\n$link\n"; command -v qrencode &>/dev/null && echo "QR:" && echo "$link" | qrencode -t ansiutf8 ;;
-  add) read -p "Имя: " email < /dev/tty; [[ -z "$email" || "$email" =~ [^a-zA-Z0-9_-] ]] && exit 1; jq -e ".inbounds[0].settings.clients[] | select(.email==\"$email\")" "$XRAY_CONFIG" &>/dev/null && exit 1; uuid=$(uuidgen); jq --arg e "$email" --arg u "$uuid" '.inbounds[0].settings.clients += [{"id": $u, "email": $e}]' "$XRAY_CONFIG" > /tmp/x.tmp && mv /tmp/x.tmp "$XRAY_CONFIG"; systemctl restart xray &>/dev/null || true; link=$(generate_link "$uuid" "$email"); echo -e "\n✅ ${email} создан\nUUID: ${uuid}\n\nСсылка:\n$link"; command -v qrencode &>/dev/null && echo -e "\nQR:" && echo "$link" | qrencode -t ansiutf8 ;;
+  add) read -p "Имя: " email < /dev/tty; [[ -z "$email" || "$email" =~ [^a-zA-Z0-9_-] ]] && exit 1; jq -e ".inbounds[0].settings.clients[] | select(.email==\"$email\")" "$XRAY_CONFIG" &>/dev/null && exit 1; uuid=$(xray uuid); jq --arg e "$email" --arg u "$uuid" '.inbounds[0].settings.clients += [{"id": $u, "email": $e}]' "$XRAY_CONFIG" > /tmp/x.tmp && mv /tmp/x.tmp "$XRAY_CONFIG"; systemctl restart xray &>/dev/null || true; link=$(generate_link "$uuid" "$email"); echo -e "\n✅ ${email} создан\nUUID: ${uuid}\n\nСсылка:\n$link"; command -v qrencode &>/dev/null && echo -e "\nQR:" && echo "$link" | qrencode -t ansiutf8 ;;
   rm) mapfile -t cl < <(jq -r '.inbounds[0].settings.clients[].email' "$XRAY_CONFIG" 2>/dev/null || echo ""); [[ ${#cl[@]} -lt 2 ]] && exit 1; for i in "${!cl[@]}"; do echo "$((i+1)). ${cl[$i]}"; done; read -p "Номер: " n < /dev/tty; [[ ! "$n" =~ ^[0-9]+$ || "$n" -lt 1 || "$n" -gt ${#cl[@]} || "${cl[$((n-1))]}" == "main" ]] && exit 1; jq --arg e "${cl[$((n-1))]}" '(.inbounds[0].settings.clients) |= map(select(.email != $e))' "$XRAY_CONFIG" > /tmp/x.tmp && mv /tmp/x.tmp "$XRAY_CONFIG"; systemctl restart xray &>/dev/null || true; echo "✅ ${cl[$((n-1))]} удалён" ;;
   link) mapfile -t cl < <(jq -r '.inbounds[0].settings.clients[].email' "$XRAY_CONFIG" 2>/dev/null || echo ""); [[ ${#cl[@]} -eq 0 ]] && exit 1; for i in "${!cl[@]}"; do echo "$((i+1)). ${cl[$i]}"; done; read -p "Номер: " n < /dev/tty; [[ ! "$n" =~ ^[0-9]+$ || "$n" -lt 1 || "$n" -gt ${#cl[@]} ]] && exit 1; uuid=$(jq -r --arg e "${cl[$((n-1))]}" '.inbounds[0].settings.clients[] | select(.email==$e) | .id' "$XRAY_CONFIG" 2>/dev/null || echo ""); [[ -z "$uuid" ]] && exit 1; link=$(generate_link "$uuid" "${cl[$((n-1))]}"); echo -e "\nСсылка:\n$link"; command -v qrencode &>/dev/null && echo -e "\nQR:" && echo "$link" | qrencode -t ansiutf8 ;;
   *) cat <<HELP
@@ -815,6 +938,13 @@ Xray (VLESS/XHTTP/Reality) — управление
 КЛЮЧИ REALITY
   • PrivateKey → в конфиг сервера (privateKey)
   • Password (вывод x25519) → ПУБЛИЧНЫЙ ключ для клиента (pbk)
+
+ГЕНЕРАЦИЯ UUID
+  • Официальный метод: xray uuid
+  • Для именованного UUID: xray uuid -i "имя_пользователя"
+
+ВАЛИДАЦИЯ КОНФИГУРАЦИИ
+  • Правильная команда: xray run -test -c /path/to/config.json
 EOF_HELP
   
   chmod 644 "$HELP_FILE"
@@ -827,7 +957,7 @@ EOF_HELP
 
 main() {
   echo -e "\n${BOLD}${SOFT_BLUE}Xray VLESS/XHTTP/Reality Installer${RESET}"
-  echo -e "${LIGHT_GRAY}Минималистичный • Без избыточной энтропии • Идемпотентный${RESET}"
+  echo -e "${LIGHT_GRAY}Официальная генерация UUID • Правильная валидация • Минималистичный${RESET}"
   echo -e "${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
   
   check_root
@@ -837,13 +967,13 @@ main() {
   
   export DEBIAN_FRONTEND=noninteractive
   
-  # 2. Системные оптимизации (без энтропии)
+  # 2. Системные оптимизации
   print_step "Системные оптимизации"
   optimize_swap
   optimize_network
   configure_trim
   
-  # 3. Домен
+  # 3. Настройка домена
   prompt_domain
   
   # 4. Безопасность
@@ -851,7 +981,7 @@ main() {
   configure_firewall
   configure_fail2ban
   
-  # 5. Зависимости (КОРРЕКТНЫЙ МАППИНГ!)
+  # 5. Зависимости
   print_step "Зависимости"
   ensure_dependency "curl" "curl"
   ensure_dependency "jq" "jq"
@@ -863,24 +993,26 @@ main() {
   ensure_dependency "unzip" "unzip"
   ensure_dependency "iproute2" "ss"
   ensure_dependency "openssl" "openssl"
-  ensure_dependency "uuid-runtime" "uuidgen"  # ← Единственная необходимая для UUID
   print_success "Все зависимости установлены"
   
-  # 6-9. Основные компоненты
+  # 6. Маскировочный сайт
   print_step "Маскировка"
   create_masking_site
   
+  # 7. Caddy
   print_step "Caddy"
   install_caddy
   configure_caddy
   
+  # 8. Xray
   print_step "Xray"
   install_xray
-  generate_xray_config  # ← Без избыточной энтропии!
+  generate_xray_config
   
-  # 10-11. Финальные шаги
+  # 9. Автообновления
   setup_auto_updates
   
+  # 10. Утилиты
   print_step "Утилиты"
   create_user_utility
   create_help_file
