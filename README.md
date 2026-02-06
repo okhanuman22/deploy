@@ -18,7 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/okhanuman22/deploy/main/install.sh 
 ```
 - Способ 2: Неинтерактивный (для автоматизации)
 ```bash
-DOMAIN=ВАШДОМЕН.OH curl -fsSL https://raw.githubusercontent.com/okhanuman22/deploy/main/install.sh | sudo bash
+DOMAIN=ВАШ.ДОМЕН.ТУТ curl -fsSL https://raw.githubusercontent.com/okhanuman22/deploy/main/install.sh | sudo bash
 ```
 
 ### 👥 Управление пользователями:
