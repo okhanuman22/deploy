@@ -360,7 +360,7 @@ EOF_SITE
 }
 
 # ============================================================================
-# Фаза 4: Установка и настройка Caddy (с валидацией домена)
+# Фаза 4: Установка и настройка Caddy (совместимая с v2.10.2)
 # ============================================================================
 
 install_caddy() {
@@ -412,9 +412,7 @@ configure_caddy() {
   fi
   
   # Генерация конфигурации с экранированием домена
-  local safe_domain
-  safe_domain=$(printf '%s' "$DOMAIN" | sed 's/[\/&]/\\&/g')
-  
+  # ВАЖНО: Убран блок 'protocol' для совместимости с Caddy v2.10.2
   cat > "$CADDYFILE" <<EOF
 {
   admin off
@@ -424,15 +422,10 @@ configure_caddy() {
       roll_keep 5
     }
   }
-  servers {
-    protocol {
-      experimental_http3
-    }
-  }
 }
 
 # Публичный сайт для маскировки трафика
-${safe_domain} {
+${DOMAIN} {
   root * ${SITE_DIR}
   file_server
   encode zstd gzip
