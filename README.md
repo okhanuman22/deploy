@@ -14,8 +14,7 @@
 
 - Способ 1: Интерактивный (рекомендуется)
 ```bash
-curl -fsSL https://raw.githubusercontent.com/okhanuman22/deploy/main/install.sh -o install.sh
-sudo bash install.sh
+curl -fsSL https://raw.githubusercontent.com/okhanuman22/deploy/main/install.sh -o install.sh && sudo bash install.sh
 ```
 - Способ 2: Неинтерактивный (для автоматизации)
 ```bash
