@@ -97,11 +97,84 @@ ensure_dependency() {
   print_success "Зависимость '${pkg}' установлена"
 }
 
+# Функция для определения процесса на порту
+get_process_on_port() {
+  local port="$1"
+  local proto="${2:-tcp}"
+  
+  if command -v ss &>/dev/null; then
+    ss -nl"${proto:0:1}"p 2>/dev/null | awk -v port=":${port}" '$4 ~ port {print $7}' | head -n1 | cut -d',' -f2 | cut -d'=' -f2
+  elif command -v netstat &>/dev/null; then
+    netstat -nl"${proto:0:1}"p 2>/dev/null | awk -v port=":${port}" '$4 ~ port {print $7}' | head -n1 | cut -d'/' -f1
+  else
+    return 1
+  fi
+}
+
+# Функция для безопасной очистки портов
+free_ports() {
+  local ports=("80" "443")
+  local proto="tcp"
+  
+  print_substep "Очистка портов 80/443 от конфликтующих процессов..."
+  
+  for port in "${ports[@]}"; do
+    local pid
+    pid=$(get_process_on_port "$port" "$proto" || echo "")
+    
+    if [[ -z "$pid" || "$pid" == "1" || "$pid" == "-" ]]; then
+      print_info "Порт ${port}/${proto} свободен"
+      continue
+    fi
+    
+    # Определение имени процесса
+    local proc_name
+    if command -v ps &>/dev/null; then
+      proc_name=$(ps -p "$pid" -o comm= 2>/dev/null || echo "PID ${pid}")
+    else
+      proc_name="PID ${pid}"
+    fi
+    
+    print_warning "Порт ${port}/${proto} занят: ${proc_name} (PID ${pid})"
+    
+    # Попытка остановки через системные сервисы
+    local stopped=false
+    for svc in nginx apache2 httpd caddy; do
+      if systemctl is-active --quiet "$svc" 2>/dev/null; then
+        print_info "Остановка сервиса ${svc}..."
+        systemctl stop "$svc" >/dev/null 2>&1 || true
+        systemctl disable "$svc" >/dev/null 2>&1 || true
+        stopped=true
+        break
+      fi
+    done
+    
+    # Если не остановлен через сервис — принудительная остановка
+    if [[ "$stopped" == false ]]; then
+      print_info "Принудительная остановка PID ${pid}..."
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    
+    # Ожидание освобождения порта
+    local attempts=0
+    while [[ -n "$(get_process_on_port "$port" "$proto" || echo "")" ]] && [[ $attempts -lt 5 ]]; do
+      sleep 1
+      ((attempts++))
+    done
+    
+    if [[ -n "$(get_process_on_port "$port" "$proto" || echo "")" ]]; then
+      print_error "Не удалось освободить порт ${port}/${proto} после 5 попыток. Остановите процесс вручную: sudo kill -9 ${pid}"
+    fi
+    
+    print_success "Порт ${port}/${proto} освобождён"
+  done
+}
+
 check_port_availability() {
   local port="$1"
   local proto="${2:-tcp}"
   
-  if ss -nl"${proto:0:1}" 2>/dev/null | awk '{print $4}' | grep -q ":${port}$"; then
+  if [[ -n "$(get_process_on_port "$port" "$proto" || echo "")" ]]; then
     print_error "Порт ${port}/${proto} занят другим процессом. Остановите конфликтующий сервис."
   fi
   
@@ -494,9 +567,8 @@ configure_caddy() {
     print_error "Переменная DOMAIN не установлена. Укажите домен перед запуском скрипта."
   fi
   
-  # Проверка доступности портов
-  check_port_availability 80 tcp
-  check_port_availability 443 tcp
+  # Очистка портов 80/443 от конфликтующих процессов
+  free_ports
   
   # Сохранение предыдущей конфигурации если существует
   if [[ -f "$CADDYFILE" ]]; then
@@ -966,6 +1038,7 @@ main() {
   ensure_dependency "gnupg" "gpg"  # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ
   ensure_dependency "ca-certificates" "update-ca-certificates"
   ensure_dependency "unzip" "unzip"
+  ensure_dependency "iproute2" "ss"  # Для диагностики портов
   
   print_success "Все зависимости установлены"
   
