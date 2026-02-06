@@ -17,6 +17,10 @@ LIGHT_GRAY='\033[38;5;250m'   # #bcbcbc — дополнительная инф�
 BOLD='\033[1m'
 RESET='\033[0m'
 
+# Лог-файл для отладки
+readonly LOG_FILE="/var/log/xray-installer.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
 print_step() {
   echo -e "\n${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
   echo -e "${BOLD}${SOFT_BLUE}▸ ${1}${RESET}"
@@ -33,6 +37,7 @@ print_warning() {
 
 print_error() {
   echo -e "\n${SOFT_RED}✗${RESET} ${BOLD}${1}${RESET}\n" >&2
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $1" >> "$LOG_FILE"
   exit 1
 }
 
@@ -58,6 +63,84 @@ DOMAIN="${DOMAIN:-}"
 SERVER_IP=""
 
 # ============================================================================
+# Функции проверки зависимостей
+# ============================================================================
+
+ensure_dependency() {
+  local pkg="$1"
+  local cmd="${2:-$pkg}"
+  local install_cmd="${3:-apt-get install -y $pkg}"
+  
+  if command -v "$cmd" &>/dev/null; then
+    return 0
+  fi
+  
+  print_info "Установка зависимости: ${pkg}..."
+  if ! eval "$install_cmd" >/dev/null 2>&1; then
+    print_error "Не удалось установить ${pkg}. Проверьте подключение к интернету."
+  fi
+  
+  if ! command -v "$cmd" &>/dev/null; then
+    print_error "После установки ${pkg} команда '${cmd}' недоступна"
+  fi
+  
+  print_success "Зависимость '${pkg}' установлена"
+}
+
+check_port_availability() {
+  local port="$1"
+  local proto="${2:-tcp}"
+  
+  if ss -nl"${proto:0:1}" | awk '{print $4}' | grep -q ":${port}$"; then
+    print_error "Порт ${port}/${proto} занят другим процессом. Остановите конфликтующий сервис."
+  fi
+  
+  print_info "Порт ${port}/${proto} доступен"
+}
+
+validate_dns_record() {
+  local domain="$1"
+  local record_type="$2"
+  
+  if ! host -t "$record_type" "$domain" &>/dev/null; then
+    return 1
+  fi
+  
+  local ip
+  ip=$(host -t "$record_type" "$domain" | awk '/has address/ {print $4; exit}' || host -t "$record_type" "$domain" | awk '/has IPv6/ {print $5; exit}')
+  echo "$ip"
+}
+
+check_dns_configuration() {
+  print_substep "Проверка DNS-записей для ${DOMAIN}..."
+  
+  local ipv4 ipv6
+  
+  ipv4=$(validate_dns_record "$DOMAIN" "A" || echo "")
+  if [[ -n "$ipv4" ]]; then
+    print_success "DNS A-запись найдена: ${ipv4}"
+  else
+    print_warning "DNS A-запись не найдена для ${DOMAIN}"
+    read -p "$(echo -e "${SOFT_YELLOW}⚠${RESET} Продолжить без проверки DNS? [y/N]: ")" confirm < /dev/tty 2>/dev/null || confirm="N"
+    [[ ! "$confirm" =~ ^[Yy]$ ]] && print_error "Установка прервана пользователем"
+  fi
+  
+  # Проверка соответствия IP сервера (если запись найдена)
+  if [[ -n "$ipv4" ]]; then
+    SERVER_IP=$(get_public_ip)
+    if [[ "$ipv4" != "$SERVER_IP" ]]; then
+      print_warning "DNS указывает на ${ipv4}, но сервер имеет IP ${SERVER_IP}"
+      read -p "$(echo -e "${SOFT_YELLOW}⚠${RESET} Продолжить с несоответствующим DNS? [y/N]: ")" confirm < /dev/tty 2>/dev/null || confirm="N"
+      [[ ! "$confirm" =~ ^[Yy]$ ]] && print_error "Установка прервана пользователем"
+    fi
+  else
+    SERVER_IP=$(get_public_ip)
+  fi
+  
+  print_info "IP-адрес сервера: ${SERVER_IP}"
+}
+
+# ============================================================================
 # Вспомогательные функции
 # ============================================================================
 
@@ -75,9 +158,7 @@ prompt_domain() {
   # Если домен задан через переменную окружения — использовать его
   if [[ -n "$DOMAIN" ]]; then
     print_info "Используется домен из переменной окружения: ${DOMAIN}"
-    SERVER_IP=$(get_public_ip)
-    print_success "Домен: ${DOMAIN}"
-    print_info "IP-адрес сервера: ${SERVER_IP}"
+    check_dns_configuration
     return
   fi
   
@@ -93,16 +174,14 @@ prompt_domain() {
     case "${use_existing:-Y}" in
       [Yy]*|"") 
         DOMAIN="$existing_domain"
-        SERVER_IP=$(get_public_ip)
-        print_success "Домен: ${DOMAIN}"
-        print_info "IP-адрес сервера: ${SERVER_IP}"
+        check_dns_configuration
         return 
         ;;
       *) ;;
     esac
   fi
   
-  # Интерактивный запрос с понятной подсказкой
+  # Интерактивный запрос
   while true; do
     local input_domain
     read -p "$(echo -e "${BOLD}Введите Ваш домен${RESET} (например, wishnu.duckdns.org): ")" input_domain < /dev/tty 2>/dev/null || {
@@ -125,9 +204,7 @@ prompt_domain() {
     break
   done
   
-  SERVER_IP=$(get_public_ip)
-  print_success "Домен: ${DOMAIN}"
-  print_info "IP-адрес сервера: ${SERVER_IP}"
+  check_dns_configuration
 }
 
 # ============================================================================
@@ -217,9 +294,7 @@ configure_trim() {
 configure_firewall() {
   print_substep "Настройка фаервола UFW"
   
-  if ! command -v ufw &>/dev/null; then
-    apt-get install -y ufw >/dev/null 2>&1
-  fi
+  ensure_dependency "ufw" "ufw" "apt-get install -y ufw"
   
   # Отключаем IPv6 если недоступен (частая проблема на VPS)
   if ! ip6tables -L &>/dev/null 2>&1; then
@@ -240,9 +315,11 @@ configure_firewall() {
   ufw allow 443/tcp comment "HTTPS (Xray)" >/dev/null 2>&1
   
   # Принудительное включение с подавлением ошибок IPv6
-  ufw --force enable >/dev/null 2>&1 || {
-    ufw enable 2>&1 | grep -v "ip6tables" || true
-  }
+  if ! ufw --force enable >/dev/null 2>&1; then
+    if ! ufw enable 2>&1 | grep -v "ip6tables" >/dev/null 2>&1; then
+      print_warning "UFW активирован с ошибками IPv6 (игнорируем для VPS без IPv6)"
+    fi
+  fi
   
   if ufw status | grep -q "Status: active"; then
     print_success "Фаервол активен (порты 22/80/443 открыты)"
@@ -254,9 +331,7 @@ configure_firewall() {
 configure_fail2ban() {
   print_substep "Настройка Fail2Ban"
   
-  if ! command -v fail2ban-client &>/dev/null; then
-    apt-get install -y fail2ban >/dev/null 2>&1
-  fi
+  ensure_dependency "fail2ban" "fail2ban-client" "apt-get install -y fail2ban"
   
   # Проверка активности
   if systemctl is-active --quiet fail2ban 2>/dev/null; then
@@ -383,7 +458,11 @@ install_caddy() {
     return
   fi
   
-  apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg >/dev/null 2>&1
+  ensure_dependency "debian-keyring"
+  ensure_dependency "debian-archive-keyring"
+  ensure_dependency "apt-transport-https"
+  ensure_dependency "curl"
+  ensure_dependency "gnupg"
   
   if [[ ! -f /usr/share/keyrings/caddy-stable-archive-keyring.gpg ]]; then
     curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
@@ -407,6 +486,10 @@ configure_caddy() {
   if [[ -z "$DOMAIN" ]]; then
     print_error "Переменная DOMAIN не установлена. Укажите домен перед запуском скрипта."
   fi
+  
+  # Проверка доступности портов
+  check_port_availability 80 tcp
+  check_port_availability 443 tcp
   
   # Сохранение предыдущей конфигурации если существует
   if [[ -f "$CADDYFILE" ]]; then
@@ -447,18 +530,23 @@ http://127.0.0.1:8001 {
 EOF
   
   # Валидация конфигурации
+  print_info "Валидация конфигурации Caddy..."
   if ! caddy validate --config "$CADDYFILE" 2>&1; then
     print_error "Ошибка валидации Caddyfile. Проверьте синтаксис конфигурации."
   fi
+  
+  print_success "Конфигурация Caddy валидна"
   
   systemctl daemon-reload
   systemctl enable caddy --now >/dev/null 2>&1
   sleep 5
   
+  # Проверка статуса сервиса
   if systemctl is-active --quiet caddy; then
     print_success "Caddy запущен (порты 80/443 активны)"
   else
-    print_warning "Caddy запущен с предупреждениями (проверьте: journalctl -u caddy -n 20)"
+    journalctl -u caddy -n 20 --no-pager > /tmp/caddy-errors.log 2>&1 || true
+    print_error "Не удалось запустить Caddy. Проверьте логи: journalctl -u caddy -n 50"
   fi
 }
 
@@ -474,6 +562,10 @@ install_xray() {
     print_info "Xray уже установлен (версия: $(xray version 2>/dev/null | head -n1 || echo 'unknown'))"
     return
   fi
+  
+  # Установка зависимостей
+  ensure_dependency "curl"
+  ensure_dependency "unzip"
   
   # Основной метод установки
   if ! bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install --version 24.11.20 2>/dev/null; then
@@ -634,6 +726,14 @@ EOF
   chown -R xray:xray /usr/local/etc/xray 2>/dev/null || true
   chmod 644 "$XRAY_CONFIG"
   
+  # Валидация конфигурации перед запуском
+  print_info "Валидация конфигурации Xray..."
+  if ! xray test --config "$XRAY_CONFIG" 2>&1; then
+    print_error "Ошибка валидации конфигурации Xray. Проверьте синтаксис."
+  fi
+  
+  print_success "Конфигурация Xray валидна"
+  
   # Перезапуск сервиса
   if systemctl is-active --quiet xray 2>/dev/null; then
     systemctl restart xray >/dev/null 2>&1
@@ -643,10 +743,12 @@ EOF
   
   sleep 5
   
+  # Проверка статуса сервиса
   if systemctl is-active --quiet xray; then
     print_success "Xray запущен"
   else
-    print_warning "Xray запущен с предупреждениями (проверьте: journalctl -u xray -n 20)"
+    journalctl -u xray -n 20 --no-pager > /tmp/xray-errors.log 2>&1 || true
+    print_error "Не удалось запустить Xray. Проверьте логи: journalctl -u xray -n 50"
   fi
 }
 
@@ -656,6 +758,9 @@ EOF
 
 create_user_utility() {
   print_substep "Создание утилиты управления пользователями"
+  
+  # Установка зависимостей для утилиты
+  ensure_dependency "qrencode"
   
   cat > /usr/local/bin/user <<'EOF_SCRIPT'
 #!/bin/bash
@@ -819,6 +924,7 @@ main() {
   echo -e "\n${BOLD}${SOFT_BLUE}Xray VLESS/XHTTP/Reality Installer${RESET}"
   echo -e "${LIGHT_GRAY}Полная системная оптимизация + маскировка трафика${RESET}"
   echo -e "${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
+  echo -e "${LIGHT_GRAY}Лог установки: ${LOG_FILE}${RESET}\n"
   
   check_root
   
@@ -839,9 +945,23 @@ main() {
   # Фаза 4: Зависимости (без интерактивных запросов)
   print_step "Установка зависимостей"
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update >/dev/null 2>&1 || true
-  apt-get install -y curl jq socat qrencode git wget gnupg ca-certificates unzip >/dev/null 2>&1
-  print_success "Зависимости установлены"
+  
+  # Обновление списка пакетов с таймаутом
+  timeout 30 apt-get update >/dev/null 2>&1 || {
+    print_warning "Не удалось обновить список пакетов, продолжаем с текущим кэшем"
+  }
+  
+  # Установка критических зависимостей
+  ensure_dependency "curl"
+  ensure_dependency "jq"
+  ensure_dependency "socat"
+  ensure_dependency "git"
+  ensure_dependency "wget"
+  ensure_dependency "gnupg"
+  ensure_dependency "ca-certificates"
+  ensure_dependency "unzip"
+  
+  print_success "Все зависимости установлены"
   
   # Фаза 5: Сайт для маскировки
   print_step "Сайт для маскировки трафика"
@@ -893,6 +1013,8 @@ main() {
   echo
   
   echo -e "${SOFT_YELLOW}⚠${RESET} SSL-сертификат будет автоматически получен при первом обращении к ${BOLD}https://${DOMAIN}${RESET}"
+  echo
+  echo -e "${LIGHT_GRAY}Подробный лог установки: ${LOG_FILE}${RESET}"
   echo
 }
 
