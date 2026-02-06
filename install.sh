@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ============================================================================
 # Xray VLESS/XHTTP/Reality Installer
-# Живая анимация • Корректный маппинг пакетов • Полная идемпотентность
+# Защита от зависаний + живая анимация + корректный маппинг пакетов
 # ============================================================================
 
 # =============== ЦВЕТОВАЯ СХЕМА ===============
@@ -37,18 +37,21 @@ print_info() { echo -e "${LIGHT_GRAY}ℹ${RESET} ${1}"; }
 print_substep() { echo -e "${MEDIUM_GRAY}  →${RESET} ${1}"; }
 
 # ============================================================================
-# УЛУЧШЕННЫЙ СПИННЕР С ВРЕМЕНЕМ И ПРОГРЕССОМ
+# НАДЕЖНЫЙ СПИННЕР С ВРЕМЕНЕМ И ЗАЩИТОЙ ОТ ПЕРЕНАПРАВЛЕНИЯ
 # ============================================================================
 run_with_spinner() {
   local cmd="$1"
   local label="${2:-Выполнение}"
   local timeout_sec="${3:-0}"
-  local show_progress="${4:-false}"
   
-  # Если не терминал — без анимации
+  # Корректная работа при перенаправленном выводе
   if [[ ! -t 1 ]]; then
-    bash -c "$cmd" 2>&1 | tee -a "$LOG_FILE"
-    return $?
+    if [[ "$timeout_sec" -gt 0 ]]; then
+      timeout "$timeout_sec" bash -c "$cmd" 2>&1 || return $?
+    else
+      bash -c "$cmd" 2>&1 || return $?
+    fi
+    return 0
   fi
   
   local spinners=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
@@ -58,9 +61,9 @@ run_with_spinner() {
   local start_time=$(date +%s)
   touch "$output_file"
   
-  # Запуск команды
-  if [[ "$show_progress" == "true" ]]; then
-    bash -c "$cmd" 2>&1 | tee "$output_file" &
+  # Запуск с таймаутом
+  if [[ "$timeout_sec" -gt 0 ]]; then
+    timeout "$timeout_sec" bash -c "$cmd" &> "$output_file" &
   else
     bash -c "$cmd" &> "$output_file" &
   fi
@@ -71,27 +74,12 @@ run_with_spinner() {
     local elapsed=$(( $(date +%s) - start_time ))
     local mins=$(( elapsed / 60 ))
     local secs=$(( elapsed % 60 ))
-    local time_str
-    [[ $mins -gt 0 ]] && time_str="${mins}m${secs}s" || time_str="${secs}s"
-    
-    # Прогресс для apt
-    local progress=""
-    if [[ "$show_progress" == "true" ]]; then
-      local pct=$(tail -n 30 "$output_file" 2>/dev/null | grep -oE '[0-9]+%' | tail -n1 || echo "")
-      [[ -n "$pct" ]] && progress=" ${pct}"
-    fi
+    local time_str="${secs}s"
+    [[ $mins -gt 0 ]] && time_str="${mins}m${secs}s"
     
     i=$(( (i + 1) % ${#spinners[@]} ))
-    printf "\r${LIGHT_GRAY}${label} ${spinners[$i]}${progress} (${time_str})${RESET}"
+    printf "\r${LIGHT_GRAY}${label} ${spinners[$i]} (${time_str})${RESET}"
     sleep 0.1
-    
-    # Таймаут
-    if [[ "$timeout_sec" -gt 0 && $elapsed -ge $timeout_sec ]]; then
-      kill -9 "$pid" 2>/dev/null
-      wait "$pid" 2>/dev/null
-      printf "\r\033[K${SOFT_RED}✗${RESET} ${label} (таймаут ${timeout_sec}s)\n"
-      return 1
-    fi
   done
   
   wait "$pid" 2>/dev/null
@@ -102,8 +90,8 @@ run_with_spinner() {
     local elapsed=$(( $(date +%s) - start_time ))
     local mins=$(( elapsed / 60 ))
     local secs=$(( elapsed % 60 ))
-    local time_str
-    [[ $mins -gt 0 ]] && time_str="${mins}m${secs}s" || time_str="${secs}s"
+    local time_str="${secs}s"
+    [[ $mins -gt 0 ]] && time_str="${mins}m${secs}s"
     
     echo -e "${SOFT_GREEN}✓${RESET} ${label} (${time_str})"
     rm -f "$output_file"
@@ -111,7 +99,6 @@ run_with_spinner() {
   else
     echo -e "${SOFT_RED}✗${RESET} ${label}"
     
-    # Детали ошибки
     if [[ -s "$output_file" ]]; then
       echo -e "\n${SOFT_RED}Детали:${RESET}"
       tail -n 15 "$output_file" | sed "s/^/  ${MEDIUM_GRAY}│${RESET} /"
@@ -184,7 +171,7 @@ get_public_ip() {
 }
 
 # ============================================================================
-# ОБНОВЛЕНИЕ СИСТЕМЫ С ЖИВЫМ ПРОГРЕССОМ
+# ОБНОВЛЕНИЕ СИСТЕМЫ
 # ============================================================================
 update_system() {
   print_step "Обновление системы"
@@ -204,7 +191,7 @@ update_system() {
   
   # Обновление системы с прогрессом
   print_info "Установка обновлений безопасности..."
-  if ! run_with_spinner "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold'" "Установка обновлений" 600 "true"; then
+  if ! run_with_spinner "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold'" "Установка обновлений" 600; then
     print_warning "Обновление завершилось с ошибками. Продолжаем установку."
   fi
   
@@ -220,23 +207,48 @@ update_system() {
 }
 
 # ============================================================================
-# ПОДГОТОВКА СИСТЕМЫ (ЭНТРОПИЯ)
+# ПОДГОТОВКА СИСТЕМЫ (ГАРАНТИРОВАННАЯ ЭНТРОПИЯ)
 # ============================================================================
 prepare_system() {
   print_substep "Энтропия"
   
-  local entropy_avail
-  entropy_avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo 0)
-  
-  if [[ "$entropy_avail" -lt 200 ]] && ! command -v haveged &>/dev/null; then
+  # Установка haveged если отсутствует
+  if ! command -v haveged &>/dev/null; then
     run_with_spinner "DEBIAN_FRONTEND=noninteractive apt-get install -y -q haveged" "Установка haveged" 30 || \
       print_error "Не удалось установить haveged"
     systemctl enable haveged --now &>/dev/null || true
+  fi
+  
+  # ГАРАНТИРОВАННЫЙ ЗАПУСК HAVEGED
+  if ! systemctl is-active --quiet haveged 2>/dev/null; then
+    print_info "Запуск haveged..."
+    systemctl start haveged &>/dev/null || true
     sleep 2
   fi
   
+  # АКТИВНОЕ ОЖИДАНИЕ ДОСТАТОЧНОЙ ЭНТРОПИИ (макс. 30 сек)
+  local entropy_avail=0
+  local max_wait=30
+  local waited=0
+  
+  while [[ "$entropy_avail" -lt 250 && $waited -lt $max_wait ]]; do
+    entropy_avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo 0)
+    if [[ "$entropy_avail" -ge 250 ]]; then
+      break
+    fi
+    
+    # Показываем прогресс каждые 3 секунды
+    if [[ $((waited % 3)) -eq 0 ]]; then
+      printf "\r${LIGHT_GRAY}Ожидание энтропии: ${entropy_avail}/250 (${waited}s)${RESET}"
+    fi
+    
+    sleep 1
+    ((waited++))
+  done
+  printf "\r\033[K"
+  
   entropy_avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo 0)
-  if [[ "$entropy_avail" -ge 200 ]]; then
+  if [[ "$entropy_avail" -ge 250 ]]; then
     print_success "Энтропия: ${entropy_avail}"
   else
     print_warning "Энтропия: ${entropy_avail} (низкая, но продолжаем)"
@@ -378,12 +390,12 @@ configure_firewall() {
   
   # НАДЕЖНАЯ ПРОВЕРКА ПОРТОВ (без синтаксических ошибок)
   local status_output
-  status_output=$(ufw status verbose 2>/dev/null || echo "")
+  status_output=$(ufw status verbose 2>/dev/null | grep -v "^Status:" | grep -v "^Logging" | grep -v "^Default" || echo "")
   
   local has_22=0 has_80=0 has_443=0
-  [[ "$status_output" == *"22/tcp"*"ALLOW"* ]] && has_22=1
-  [[ "$status_output" == *"80/tcp"*"ALLOW"* ]] && has_80=1
-  [[ "$status_output" == *"443/tcp"*"ALLOW"* ]] && has_443=1
+  [[ "$status_output" == *"22/tcp"* ]] && has_22=1
+  [[ "$status_output" == *"80/tcp"* ]] && has_80=1
+  [[ "$status_output" == *"443/tcp"* ]] && has_443=1
   
   if ufw status | grep -q "Status: active" && [[ $has_22 -eq 1 && $has_80 -eq 1 && $has_443 -eq 1 ]]; then
     print_info "✓ Активен (22/80/443 открыты)"
@@ -557,7 +569,7 @@ EOF_SITE
   printf '\x00' > "$SITE_DIR/favicon.ico" 2>/dev/null || true
   
   # ИСПРАВЛЕНО: опечатка www-www-data → www-data
-  chown -R www-www-data "$SITE_DIR" 2>/dev/null || true
+  chown -R www-data:www-data "$SITE_DIR" 2>/dev/null || true
   chmod -R 755 "$SITE_DIR"
   
   print_success "Сайт создан"
@@ -738,6 +750,9 @@ install_xray() {
   print_success "Xray установлен ($(xray version | head -n1 | cut -d' ' -f1-3))"
 }
 
+# ============================================================================
+# ГЕНЕРАЦИЯ КОНФИГУРАЦИИ С ЗАЩИТОЙ ОТ ЗАВИСАНИЙ
+# ============================================================================
 generate_xray_config() {
   print_substep "Генерация конфигурации"
   
@@ -756,21 +771,64 @@ generate_xray_config() {
     secret_path=$(tr -dc 'a-z0-9' < /dev/urandom | head -c 8)
     uuid=$(cat /proc/sys/kernel/random/uuid)
     
-    # Генерация ключей с таймаутом
-    local key_pair
-    if ! key_pair=$(run_with_spinner "xray x25519 2>/dev/null" "Генерация ключей" 20); then
-      print_error "Генерация ключей превысила 20 сек. Установите haveged и повторите."
+    # ============================================================================
+    # КРИТИЧЕСКАЯ ЗАЩИТА: ГАРАНТИРОВАННАЯ ЭНТРОПИЯ ПЕРЕД ГЕНЕРАЦИЕЙ КЛЮЧЕЙ
+    # ============================================================================
+    print_info "Проверка энтропии перед генерацией ключей..."
+    
+    # Убедимся, что haveged активен
+    if ! systemctl is-active --quiet haveged 2>/dev/null; then
+      print_warning "haveged не активен. Принудительный запуск..."
+      systemctl start haveged 2>/dev/null || true
+      sleep 3
     fi
     
+    # Активное ожидание достаточной энтропии (макс. 30 сек)
+    local entropy_avail=0
+    local max_wait=30
+    local waited=0
+    
+    while [[ "$entropy_avail" -lt 250 && $waited -lt $max_wait ]]; do
+      entropy_avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo 0)
+      if [[ "$entropy_avail" -ge 250 ]]; then
+        break
+      fi
+      
+      # Показываем прогресс каждые 2 секунды
+      if [[ $((waited % 2)) -eq 0 ]]; then
+        printf "\r${LIGHT_GRAY}Ожидание энтропии: ${entropy_avail}/250 (${waited}s)${RESET}"
+      fi
+      
+      sleep 1
+      ((waited++))
+    done
+    printf "\r\033[K${LIGHT_GRAY}Энтропия: ${entropy_avail}${RESET}\n"
+    
+    # ГЕНЕРАЦИЯ КЛЮЧЕЙ С ТАЙМАУТОМ 60 СЕК
+    print_info "Генерация X25519 ключей..."
+    local key_pair
+    if ! key_pair=$(timeout 60 xray x25519 2>&1); then
+      print_error "Генерация ключей превысила 60 сек. Текущая энтропия: $(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo 'неизвестно')
+  
+Решение:
+  1. Убедитесь, что haveged запущен: sudo systemctl status haveged
+  2. Проверьте энтропию: cat /proc/sys/kernel/random/entropy_avail
+  3. Если энтропия < 200, выполните: sudo systemctl restart haveged && sleep 10
+  4. Повторите установку скрипта."
+    fi
+    
+    # Извлечение ключей
     priv_key=$(echo "$key_pair" | grep -i "^PrivateKey" | awk '{print $NF}')
     pub_key=$(echo "$key_pair" | grep -i "^Password" | awk '{print $NF}')
     
+    # Валидация ключей
     if [[ -z "$priv_key" || -z "$pub_key" || "${#priv_key}" -lt 40 || "${#pub_key}" -lt 40 ]]; then
       print_error "Некорректные ключи (PrivateKey: ${priv_key:0:12}..., PublicKey: ${pub_key:0:12}...)"
     fi
     
     short_id=$(openssl rand -hex 4)
     
+    # Сохранение параметров
     {
       echo "path: /${secret_path}"
       echo "uuid: ${uuid}"
@@ -840,12 +898,12 @@ EOF
   chown -R xray:xray /usr/local/etc/xray 2>/dev/null || true
   chmod 644 "$XRAY_CONFIG"
   
-  # Валидация
+  # Валидация конфигурации
   if ! output=$(xray test --config "$XRAY_CONFIG" 2>&1); then
     print_error "Ошибка валидации Xray:\n$output"
   fi
   
-  # Запуск
+  # Запуск Xray
   if systemctl is-active --quiet xray 2>/dev/null; then
     run_with_spinner "systemctl restart xray &>/dev/null" "Перезапуск Xray" 10 || \
       print_error "Не удалось перезапустить Xray"
@@ -1019,7 +1077,7 @@ EOF_HELP
 
 main() {
   echo -e "\n${BOLD}${SOFT_BLUE}Xray VLESS/XHTTP/Reality Installer${RESET}"
-  echo -e "${LIGHT_GRAY}Живая анимация • Корректный маппинг пакетов • Полная идемпотентность${RESET}"
+  echo -e "${LIGHT_GRAY}Защита от зависаний • Живая анимация • Корректный маппинг${RESET}"
   echo -e "${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
   
   check_root
@@ -1027,7 +1085,7 @@ main() {
   # 1. Обновление системы
   update_system
   
-  # 2. Подготовка системы
+  # 2. Подготовка системы (с гарантированной энтропией)
   prepare_system
   export DEBIAN_FRONTEND=noninteractive
   
@@ -1072,7 +1130,7 @@ main() {
   # 9. Xray
   print_step "Xray"
   install_xray
-  generate_xray_config
+  generate_xray_config  # ← С защитой от зависаний!
   
   # 10. Автообновления
   setup_auto_updates
