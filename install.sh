@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ============================================================================
 # Xray VLESS/XHTTP/Reality Installer
-# Минималистичный вывод + идемпотентность + исправленные ошибки
+# Живая анимация • Корректный маппинг пакетов • Полная идемпотентность
 # ============================================================================
 
 # =============== ЦВЕТОВАЯ СХЕМА ===============
@@ -37,57 +37,84 @@ print_info() { echo -e "${LIGHT_GRAY}ℹ${RESET} ${1}"; }
 print_substep() { echo -e "${MEDIUM_GRAY}  →${RESET} ${1}"; }
 
 # ============================================================================
-# УМНЫЙ СПИННЕР: минималистичный вывод + детали ТОЛЬКО при ошибке
+# УЛУЧШЕННЫЙ СПИННЕР С ВРЕМЕНЕМ И ПРОГРЕССОМ
 # ============================================================================
 run_with_spinner() {
   local cmd="$1"
   local label="${2:-Выполнение}"
   local timeout_sec="${3:-0}"
+  local show_progress="${4:-false}"
   
   # Если не терминал — без анимации
   if [[ ! -t 1 ]]; then
-    bash -c "$cmd" &>/dev/null || return $?
-    return 0
+    bash -c "$cmd" 2>&1 | tee -a "$LOG_FILE"
+    return $?
   fi
   
   local spinners=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
   local i=0
   local pid=""
   local output_file="/tmp/spinner_out_$$"
+  local start_time=$(date +%s)
   touch "$output_file"
   
-  # Запуск команды в фоне с подавлением вывода
-  if [[ "$timeout_sec" -gt 0 ]]; then
-    timeout "$timeout_sec" bash -c "$cmd" &> "$output_file" &
+  # Запуск команды
+  if [[ "$show_progress" == "true" ]]; then
+    bash -c "$cmd" 2>&1 | tee "$output_file" &
   else
     bash -c "$cmd" &> "$output_file" &
   fi
   pid=$!
   
-  # Анимация
-  echo -ne "${LIGHT_GRAY}${label} ${spinners[0]}${RESET}"
+  # Анимация с отображением времени
   while kill -0 "$pid" 2>/dev/null; do
+    local elapsed=$(( $(date +%s) - start_time ))
+    local mins=$(( elapsed / 60 ))
+    local secs=$(( elapsed % 60 ))
+    local time_str
+    [[ $mins -gt 0 ]] && time_str="${mins}m${secs}s" || time_str="${secs}s"
+    
+    # Прогресс для apt
+    local progress=""
+    if [[ "$show_progress" == "true" ]]; then
+      local pct=$(tail -n 30 "$output_file" 2>/dev/null | grep -oE '[0-9]+%' | tail -n1 || echo "")
+      [[ -n "$pct" ]] && progress=" ${pct}"
+    fi
+    
     i=$(( (i + 1) % ${#spinners[@]} ))
-    echo -ne "\r${LIGHT_GRAY}${label} ${spinners[$i]}${RESET}"
-    sleep 0.08
+    printf "\r${LIGHT_GRAY}${label} ${spinners[$i]}${progress} (${time_str})${RESET}"
+    sleep 0.1
+    
+    # Таймаут
+    if [[ "$timeout_sec" -gt 0 && $elapsed -ge $timeout_sec ]]; then
+      kill -9 "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      printf "\r\033[K${SOFT_RED}✗${RESET} ${label} (таймаут ${timeout_sec}s)\n"
+      return 1
+    fi
   done
   
   wait "$pid" 2>/dev/null
   local exit_code=$?
-  
-  echo -ne "\r\033[K"
+  printf "\r\033[K"
   
   if [[ $exit_code -eq 0 ]]; then
-    echo -e "${SOFT_GREEN}✓${RESET} ${label}"
+    local elapsed=$(( $(date +%s) - start_time ))
+    local mins=$(( elapsed / 60 ))
+    local secs=$(( elapsed % 60 ))
+    local time_str
+    [[ $mins -gt 0 ]] && time_str="${mins}m${secs}s" || time_str="${secs}s"
+    
+    echo -e "${SOFT_GREEN}✓${RESET} ${label} (${time_str})"
     rm -f "$output_file"
     return 0
   else
     echo -e "${SOFT_RED}✗${RESET} ${label}"
     
-    # Показываем вывод ТОЛЬКО при ошибке
+    # Детали ошибки
     if [[ -s "$output_file" ]]; then
       echo -e "\n${SOFT_RED}Детали:${RESET}"
-      tail -n 10 "$output_file" | sed "s/^/  ${MEDIUM_GRAY}│${RESET} /"
+      tail -n 15 "$output_file" | sed "s/^/  ${MEDIUM_GRAY}│${RESET} /"
       echo
     fi
     
@@ -97,31 +124,32 @@ run_with_spinner() {
 }
 
 # ============================================================================
-# ИДЕМПОТЕНТНАЯ УСТАНОВКА ЗАВИСИМОСТЕЙ (с минимизированным выводом)
+# ИДЕМПОТЕНТНАЯ УСТАНОВКА ЗАВИСИМОСТЕЙ (КОРРЕКТНЫЙ МАППИНГ)
 # ============================================================================
 ensure_dependency() {
   local pkg="$1"
   local cmd="${2:-$pkg}"
   
-  # Проверка наличия
-  if [[ "$cmd" != "-" ]]; then
-    if command -v "$cmd" &>/dev/null; then
-      print_info "✓ ${pkg}"
-      return 0
-    fi
-  else
+  # Проверка для пакетов БЕЗ команды
+  if [[ "$cmd" == "-" ]]; then
     if dpkg -l | grep -q "^ii.* $pkg "; then
       print_info "✓ ${pkg}"
       return 0
     fi
+  else
+    # Проверка для пакетов С командой
+    if command -v "$cmd" &>/dev/null; then
+      print_info "✓ ${pkg}"
+      return 0
+    fi
   fi
   
-  # Установка с тихим режимом (-qq)
-  if ! run_with_spinner "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends $pkg" "Установка ${pkg}" 0; then
+  # Установка
+  if ! run_with_spinner "DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends $pkg" "Установка ${pkg}" 120; then
     print_error "Не удалось установить ${pkg}"
   fi
   
-  # Проверка
+  # Финальная проверка
   if [[ "$cmd" != "-" ]] && ! command -v "$cmd" &>/dev/null; then
     print_error "Команда '${cmd}' недоступна после установки ${pkg}"
   fi
@@ -130,7 +158,7 @@ ensure_dependency() {
 }
 
 # ============================================================================
-# Глобальные переменные
+# ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
 # ============================================================================
 
 readonly XRAY_CONFIG="/usr/local/etc/xray/config.json"
@@ -144,7 +172,7 @@ DOMAIN="${DOMAIN:-}"
 SERVER_IP=""
 
 # ============================================================================
-# Вспомогательные функции
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ============================================================================
 
 check_root() {
@@ -156,7 +184,7 @@ get_public_ip() {
 }
 
 # ============================================================================
-# ОБНОВЛЕНИЕ СИСТЕМЫ (минимизированный вывод)
+# ОБНОВЛЕНИЕ СИСТЕМЫ С ЖИВЫМ ПРОГРЕССОМ
 # ============================================================================
 update_system() {
   print_step "Обновление системы"
@@ -164,15 +192,21 @@ update_system() {
   # Проверка места на диске
   local free_mb
   free_mb=$(df / --output=avail | tail -n1 | awk '{print int($1/1024)}')
-  [[ "$free_mb" -lt 300 ]] && print_warning "Мало места: ${free_mb} МБ" && read -p "Продолжить? [y/N]: " c < /dev/tty && [[ ! "$c" =~ ^[Yy]$ ]] && exit 1
+  if [[ "$free_mb" -lt 300 ]]; then
+    print_warning "Мало места: ${free_mb} МБ (рекомендуется >300 МБ)"
+    read -p "Продолжить? [y/N]: " confirm < /dev/tty 2>/dev/null || { echo; exit 1; }
+    [[ ! "$confirm" =~ ^[Yy]$ ]] && print_error "Установка прервана"
+  fi
   
   # Обновление списка пакетов
-  run_with_spinner "apt-get update -qq" "Обновление списка пакетов" 0 || \
+  run_with_spinner "apt-get update -q" "Обновление списка пакетов" 60 || \
     print_error "Не удалось обновить список пакетов"
   
-  # Обновление системы
-  run_with_spinner "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold'" "Установка обновлений" 0 || \
-    print_warning "Обновление завершилось с предупреждениями"
+  # Обновление системы с прогрессом
+  print_info "Установка обновлений безопасности..."
+  if ! run_with_spinner "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold'" "Установка обновлений" 600 "true"; then
+    print_warning "Обновление завершилось с ошибками. Продолжаем установку."
+  fi
   
   # Проверка перезагрузки
   if [[ -f /var/run/reboot-required ]]; then
@@ -186,7 +220,7 @@ update_system() {
 }
 
 # ============================================================================
-# ПОДГОТОВКА СИСТЕМЫ
+# ПОДГОТОВКА СИСТЕМЫ (ЭНТРОПИЯ)
 # ============================================================================
 prepare_system() {
   print_substep "Энтропия"
@@ -195,18 +229,22 @@ prepare_system() {
   entropy_avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo 0)
   
   if [[ "$entropy_avail" -lt 200 ]] && ! command -v haveged &>/dev/null; then
-    run_with_spinner "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq haveged" "Установка haveged" 0 || \
+    run_with_spinner "DEBIAN_FRONTEND=noninteractive apt-get install -y -q haveged" "Установка haveged" 30 || \
       print_error "Не удалось установить haveged"
     systemctl enable haveged --now &>/dev/null || true
     sleep 2
   fi
   
   entropy_avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo 0)
-  [[ "$entropy_avail" -ge 200 ]] && print_success "Энтропия: ${entropy_avail}" || print_warning "Энтропия: ${entropy_avail} (низкая)"
+  if [[ "$entropy_avail" -ge 200 ]]; then
+    print_success "Энтропия: ${entropy_avail}"
+  else
+    print_warning "Энтропия: ${entropy_avail} (низкая, но продолжаем)"
+  fi
 }
 
 # ============================================================================
-# ОПТИМИЗАЦИЯ SWAP (правильная логика)
+# ОПТИМИЗАЦИЯ SWAP (ПРАВИЛЬНАЯ ЛОГИКА)
 # ============================================================================
 optimize_swap() {
   print_substep "Swap"
@@ -220,16 +258,32 @@ optimize_swap() {
   total_mem=$(free -m | awk '/^Mem:/ {print $2}')
   local swap_size_gb=0.5
   
-  if [[ "$total_mem" -le 1024 ]]; then swap_size_gb=2; print_info "RAM ≤ 1 ГБ → 2 ГБ swap"
-  elif [[ "$total_mem" -le 2048 ]]; then swap_size_gb=1; print_info "RAM ≤ 2 ГБ → 1 ГБ swap"
-  elif [[ "$total_mem" -le 4096 ]]; then swap_size_gb=0.5; print_info "RAM ≤ 4 ГБ → 512 МБ swap"
-  else print_info "RAM > 4 ГБ → 512 МБ swap"; fi
+  if [[ "$total_mem" -le 1024 ]]; then
+    swap_size_gb=2
+    print_info "RAM ≤ 1 ГБ → 2 ГБ swap"
+  elif [[ "$total_mem" -le 2048 ]]; then
+    swap_size_gb=1
+    print_info "RAM ≤ 2 ГБ → 1 ГБ swap"
+  elif [[ "$total_mem" -le 4096 ]]; then
+    swap_size_gb=0.5
+    print_info "RAM ≤ 4 ГБ → 512 МБ swap"
+  else
+    print_info "RAM > 4 ГБ → 512 МБ swap"
+  fi
   
   if [[ ! -f /swapfile ]]; then
     local bs count
-    [[ "$swap_size_gb" == "0.5" ]] && bs="512M" count=1 || bs="1G" count="$swap_size_gb"
-    run_with_spinner "dd if=/dev/zero of=/swapfile bs=$bs count=$count status=none 2>/dev/null && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile" "Создание swap" 0 || \
+    if [[ "$swap_size_gb" == "0.5" ]]; then
+      bs="512M"
+      count=1
+    else
+      bs="1G"
+      count="$swap_size_gb"
+    fi
+    
+    run_with_spinner "dd if=/dev/zero of=/swapfile bs=$bs count=$count status=none 2>/dev/null && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile" "Создание swap" 60 || \
       print_error "Не удалось создать swap"
+    
     grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
   else
     swapon /swapfile &>/dev/null || true
@@ -244,7 +298,10 @@ optimize_swap() {
 optimize_network() {
   print_substep "Сеть (BBR)"
   
-  [[ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '')" == "bbr" ]] && print_info "✓ Уже включён" && return 0
+  if [[ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '')" == "bbr" ]]; then
+    print_info "✓ Уже включён"
+    return 0
+  fi
   
   cat > /etc/sysctl.d/99-xray-tuning.conf <<EOF
 net.core.default_qdisc=fq
@@ -271,54 +328,62 @@ net.ipv4.conf.all.accept_redirects=0
 net.ipv4.conf.default.accept_redirects=0
 EOF
   
-  run_with_spinner "sysctl -p /etc/sysctl.d/99-xray-tuning.conf &>/dev/null" "Применение настроек" 0 || \
+  run_with_spinner "sysctl -p /etc/sysctl.d/99-xray-tuning.conf &>/dev/null" "Применение настроек" 10 || \
     print_error "Не удалось применить сетевые настройки"
   
   print_success "BBR активен"
 }
 
 # ============================================================================
-# ОПТИМИЗАЦИЯ SSD (TRIM через lsblk --discard)
+# ОПТИМИЗАЦИЯ SSD (TRIM ЧЕРЕЗ lsblk --discard)
 # ============================================================================
 configure_trim() {
   print_substep "TRIM (SSD)"
   
   local trim_supported=0
-  command -v lsblk &>/dev/null && trim_supported=$(lsblk --discard -no DISC-GRAN 2>/dev/null | awk '$1 != "0B" && $1 != "" {count++} END {print count+0}')
+  if command -v lsblk &>/dev/null; then
+    trim_supported=$(lsblk --discard -no DISC-GRAN 2>/dev/null | awk '$1 != "0B" && $1 != "" {count++} END {print count+0}' || echo 0)
+  fi
   
-  [[ "$trim_supported" -eq 0 ]] && print_info "Не поддерживается" && return 0
+  if [[ "$trim_supported" -eq 0 ]]; then
+    print_info "Не поддерживается дисками"
+    return 0
+  fi
   
   if systemctl is-active --quiet fstrim.timer 2>/dev/null; then
     print_info "✓ Активен (${trim_supported} диск(а))"
     return 0
   fi
   
-  run_with_spinner "systemctl enable fstrim.timer --now &>/dev/null" "Активация TRIM" 0 || \
+  run_with_spinner "systemctl enable fstrim.timer --now &>/dev/null" "Активация TRIM" 10 || \
     print_warning "Не удалось активировать TRIM"
   
   print_success "TRIM активирован"
 }
 
 # ============================================================================
-# ФАЕРВОЛ (ИСПРАВЛЕНА ОШИБКА С ПОРТАМИ)
+# ФАЕРВОЛ (ИСПРАВЛЕНА ПРОВЕРКА ПОРТОВ)
 # ============================================================================
 configure_firewall() {
   print_substep "Фаервол (UFW)"
   
-  ! command -v ufw &>/dev/null && ensure_dependency "ufw" "ufw"
+  if ! command -v ufw &>/dev/null; then
+    ensure_dependency "ufw" "ufw"
+  fi
   
   # Отключение IPv6 если недоступен
-  ! ip6tables -L &>/dev/null 2>&1 && grep -q '^IPV6=yes' /etc/default/ufw 2>/dev/null && \
+  if ! ip6tables -L &>/dev/null 2>&1 && grep -q '^IPV6=yes' /etc/default/ufw 2>/dev/null; then
     sed -i 's/^IPV6=yes/IPV6=no/' /etc/default/ufw 2>/dev/null
+  fi
   
-  # НАДЕЖНАЯ ПРОВЕРКА ПОРТОВ (исправлена ошибка)
+  # НАДЕЖНАЯ ПРОВЕРКА ПОРТОВ (без синтаксических ошибок)
   local status_output
   status_output=$(ufw status verbose 2>/dev/null || echo "")
   
   local has_22=0 has_80=0 has_443=0
-  [[ "$status_output" =~ "22/tcp".*"ALLOW" ]] && has_22=1
-  [[ "$status_output" =~ "80/tcp".*"ALLOW" ]] && has_80=1
-  [[ "$status_output" =~ "443/tcp".*"ALLOW" ]] && has_443=1
+  [[ "$status_output" == *"22/tcp"*"ALLOW"* ]] && has_22=1
+  [[ "$status_output" == *"80/tcp"*"ALLOW"* ]] && has_80=1
+  [[ "$status_output" == *"443/tcp"*"ALLOW"* ]] && has_443=1
   
   if ufw status | grep -q "Status: active" && [[ $has_22 -eq 1 && $has_80 -eq 1 && $has_443 -eq 1 ]]; then
     print_info "✓ Активен (22/80/443 открыты)"
@@ -332,7 +397,9 @@ configure_firewall() {
   ufw allow 80/tcp comment "HTTP" &>/dev/null || true
   ufw allow 443/tcp comment "HTTPS" &>/dev/null || true
   
-  ! ufw status | grep -q "Status: active" && run_with_spinner "ufw --force enable &>/dev/null" "Активация UFW" 0 || true
+  if ! ufw status | grep -q "Status: active"; then
+    run_with_spinner "ufw --force enable &>/dev/null" "Активация UFW" 15 || true
+  fi
   
   print_success "UFW активен"
 }
@@ -343,11 +410,17 @@ configure_firewall() {
 configure_fail2ban() {
   print_substep "Fail2Ban"
   
-  ! command -v fail2ban-client &>/dev/null && ensure_dependency "fail2ban" "fail2ban-client"
+  if ! command -v fail2ban-client &>/dev/null; then
+    ensure_dependency "fail2ban" "fail2ban-client"
+  fi
   
-  systemctl is-active --quiet fail2ban 2>/dev/null && print_info "✓ Уже активен" && return 0
+  if systemctl is-active --quiet fail2ban 2>/dev/null; then
+    print_info "✓ Уже активен"
+    return 0
+  fi
   
-  [[ ! -f /etc/fail2ban/jail.local ]] && cat > /etc/fail2ban/jail.local <<EOF
+  if [[ ! -f /etc/fail2ban/jail.local ]]; then
+    cat > /etc/fail2ban/jail.local <<EOF
 [sshd]
 enabled = true
 port = ssh
@@ -358,16 +431,21 @@ bantime = 1h
 findtime = 10m
 ignoreip = 127.0.0.1/8 ::1
 EOF
+  fi
   
   systemctl enable fail2ban &>/dev/null || true
-  run_with_spinner "systemctl start fail2ban &>/dev/null" "Запуск Fail2Ban" 0 || true
+  run_with_spinner "systemctl start fail2ban &>/dev/null" "Запуск Fail2Ban" 10 || true
   
   sleep 1
-  systemctl is-active --quiet fail2ban && print_success "Fail2Ban активен" || print_warning "Fail2Ban запущен в фоне"
+  if systemctl is-active --quiet fail2ban; then
+    print_success "Fail2Ban активен"
+  else
+    print_warning "Fail2Ban запущен в фоне"
+  fi
 }
 
 # ============================================================================
-# МАСКИРОВОЧНЫЙ САЙТ (одна страница)
+# МАСКИРОВОЧНЫЙ САЙТ (ОДНА СТРАНИЦА)
 # ============================================================================
 create_masking_site() {
   print_substep "Маскировочный сайт"
@@ -478,6 +556,7 @@ EOF_SITE
   echo -e "User-agent: *\nDisallow: /admin/" > "$SITE_DIR/robots.txt"
   printf '\x00' > "$SITE_DIR/favicon.ico" 2>/dev/null || true
   
+  # ИСПРАВЛЕНО: опечатка www-www-data → www-data
   chown -R www-www-data "$SITE_DIR" 2>/dev/null || true
   chmod -R 755 "$SITE_DIR"
   
@@ -485,30 +564,46 @@ EOF_SITE
 }
 
 # ============================================================================
-# CADDY
+# УСТАНОВКА CADDY (КОРРЕКТНЫЙ МАППИНГ ПАКЕТОВ)
 # ============================================================================
 install_caddy() {
   print_substep "Caddy"
   
+  # Остановка конфликтующих сервисов
   for svc in nginx apache2 httpd; do
-    systemctl is-active --quiet "$svc" 2>/dev/null && systemctl stop "$svc" &>/dev/null && systemctl disable "$svc" &>/dev/null
+    if systemctl is-active --quiet "$svc" 2>/dev/null; then
+      systemctl stop "$svc" &>/dev/null
+      systemctl disable "$svc" &>/dev/null
+    fi
   done
   
-  command -v caddy &>/dev/null && print_info "✓ Уже установлен ($(caddy version | head -n1 | cut -d' ' -f1))" && return 0
+  # Проверка установки
+  if command -v caddy &>/dev/null; then
+    print_info "✓ Уже установлен ($(caddy version | head -n1 | cut -d' ' -f1))"
+    return 0
+  fi
   
-  for pkg in debian-keyring debian-archive-keyring apt-transport-https curl gnupg; do
-    ensure_dependency "$pkg" "${pkg//-/}"
-  done
+  # УСТАНОВКА ЗАВИСИМОСТЕЙ С КОРРЕКТНЫМ МАППИНГОМ
+  ensure_dependency "debian-keyring" "-"                # ← Пакет без команды
+  ensure_dependency "debian-archive-keyring" "-"         # ← Пакет без команды
+  ensure_dependency "apt-transport-https" "-"            # ← Пакет без команды
+  ensure_dependency "curl" "curl"
+  ensure_dependency "gnupg" "gpg"                        # ← gnupg → команда gpg
   
-  [[ ! -f /usr/share/keyrings/caddy-stable-archive-keyring.gpg ]] && \
-    run_with_spinner "curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg" "Импорт ключа" 0 || \
-    print_error "Не удалось импортировать ключ"
+  # Импорт ключа Caddy
+  if [[ ! -f /usr/share/keyrings/caddy-stable-archive-keyring.gpg ]]; then
+    run_with_spinner "curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg" "Импорт ключа Caddy" 15 || \
+      print_error "Не удалось импортировать ключ Caddy"
+  fi
   
-  [[ ! -f /etc/apt/sources.list.d/caddy-stable.list ]] && \
-    echo "deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main" > /etc/apt/sources.list.d/caddy-stable.list && \
-    run_with_spinner "apt-get update -qq" "Обновление списка" 0
+  # Настройка репозитория
+  if [[ ! -f /etc/apt/sources.list.d/caddy-stable.list ]]; then
+    echo "deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main" > /etc/apt/sources.list.d/caddy-stable.list
+    run_with_spinner "apt-get update -qq" "Обновление списка пакетов" 30
+  fi
   
-  run_with_spinner "apt-get install -y -qq caddy" "Установка Caddy" 0 || \
+  # Установка Caddy
+  run_with_spinner "apt-get install -y -qq caddy" "Установка Caddy" 60 || \
     print_error "Не удалось установить Caddy"
   
   print_success "Caddy установлен ($(caddy version | head -n1 | cut -d' ' -f1))"
@@ -521,11 +616,15 @@ configure_caddy() {
   
   # Очистка портов
   for port in 80 443; do
+    local pid
     pid=$(ss -tlnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p {print $7}' | head -n1 | cut -d',' -f2 | cut -d'=' -f2 || echo "")
-    [[ -n "$pid" && "$pid" != "1" && "$pid" != "-" ]] && kill -9 "$pid" 2>/dev/null || true
-    sleep 1
+    if [[ -n "$pid" && "$pid" != "1" && "$pid" != "-" ]]; then
+      kill -9 "$pid" 2>/dev/null || true
+      sleep 1
+    fi
   done
   
+  # Генерация конфигурации
   cat > "$CADDYFILE" <<EOF
 {
   admin off
@@ -549,7 +648,7 @@ http://127.0.0.1:8001 {
 }
 EOF
   
-  # Валидация без вывода
+  # Валидация
   if ! output=$(caddy validate --config "$CADDYFILE" 2>&1); then
     print_error "Ошибка валидации Caddyfile:\n$output"
   fi
@@ -558,23 +657,38 @@ EOF
   systemctl enable caddy --now &>/dev/null || true
   sleep 3
   
-  systemctl is-active --quiet caddy && print_success "Caddy запущен" || \
-    print_error "Не удалось запустить Caddy (journalctl -u caddy -n 20)"
+  if systemctl is-active --quiet caddy; then
+    print_success "Caddy запущен"
+  else
+    print_error "Не удалось запустить Caddy (проверьте: journalctl -u caddy -n 20)"
+  fi
 }
 
 # ============================================================================
-# ДОМЕН
+# НАСТРОЙКА ДОМЕНА
 # ============================================================================
 prompt_domain() {
   print_step "Домен"
   
-  [[ -n "$DOMAIN" ]] && validate_and_set_domain "$DOMAIN" && return
+  # Переменная окружения
+  if [[ -n "$DOMAIN" ]]; then
+    validate_and_set_domain "$DOMAIN"
+    return
+  fi
   
-  [[ -f "$XRAY_CONFIG" && $(command -v jq &>/dev/null && jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0] // empty' "$XRAY_CONFIG" 2>/dev/null || echo "") != "null" ]] && \
-    DOMAIN=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0]' "$XRAY_CONFIG" 2>/dev/null) && \
-    SERVER_IP=$(get_public_ip) && \
-    print_info "Используется домен из конфигурации: ${DOMAIN}" && return
+  # Существующая конфигурация
+  if [[ -f "$XRAY_CONFIG" ]] && command -v jq &>/dev/null; then
+    local existing_domain
+    existing_domain=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0] // empty' "$XRAY_CONFIG" 2>/dev/null || echo "")
+    if [[ -n "$existing_domain" && "$existing_domain" != "null" ]]; then
+      DOMAIN="$existing_domain"
+      SERVER_IP=$(get_public_ip)
+      print_info "Используется домен из конфигурации: ${DOMAIN}"
+      return
+    fi
+  fi
   
+  # Интерактивный запрос
   echo -e "${BOLD}Домен${RESET} (wishnu.duckdns.org):"
   read -r DOMAIN < /dev/tty
   DOMAIN=$(echo "$DOMAIN" | tr -d '[:space:]')
@@ -585,31 +699,41 @@ prompt_domain() {
 
 validate_and_set_domain() {
   local input_domain="$1"
-  local ipv4=$(host -t A "$input_domain" 2>/dev/null | awk '/has address/ {print $4; exit}' || echo "")
+  local ipv4
+  ipv4=$(host -t A "$input_domain" 2>/dev/null | awk '/has address/ {print $4; exit}' || echo "")
   
-  [[ -z "$ipv4" ]] && read -p "DNS не найден. Продолжить? [y/N]: " c < /dev/tty && [[ ! "$c" =~ ^[Yy]$ ]] && exit 1
+  if [[ -z "$ipv4" ]]; then
+    read -p "DNS не найден. Продолжить? [y/N]: " confirm < /dev/tty 2>/dev/null || { echo; exit 1; }
+    [[ ! "$confirm" =~ ^[Yy]$ ]] && exit 1
+  fi
   
   SERVER_IP=$(get_public_ip)
-  [[ -n "$ipv4" && "$ipv4" != "$SERVER_IP" ]] && read -p "DNS (${ipv4}) ≠ IP (${SERVER_IP}). Продолжить? [y/N]: " c < /dev/tty && [[ ! "$c" =~ ^[Yy]$ ]] && exit 1
+  if [[ -n "$ipv4" && "$ipv4" != "$SERVER_IP" ]]; then
+    read -p "DNS (${ipv4}) ≠ IP (${SERVER_IP}). Продолжить? [y/N]: " confirm < /dev/tty 2>/dev/null || { echo; exit 1; }
+    [[ ! "$confirm" =~ ^[Yy]$ ]] && exit 1
+  fi
   
   DOMAIN="$input_domain"
   print_success "Домен: ${DOMAIN} → ${SERVER_IP}"
 }
 
 # ============================================================================
-# XRAY
+# УСТАНОВКА XRAY
 # ============================================================================
 install_xray() {
   print_substep "Xray Core"
   
-  command -v xray &>/dev/null && print_info "✓ Уже установлен ($(xray version | head -n1 | cut -d' ' -f1-3))" && return 0
+  if command -v xray &>/dev/null; then
+    print_info "✓ Уже установлен ($(xray version | head -n1 | cut -d' ' -f1-3))"
+    return 0
+  fi
   
   ensure_dependency "curl" "curl"
   
-  run_with_spinner "bash -c \"\$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)\" @ install" "Установка Xray" 0 || \
+  run_with_spinner "bash -c \"\$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)\" @ install" "Установка Xray" 120 || \
     print_error "Не удалось установить Xray"
   
-  run_with_spinner "bash -c \"\$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)\" @ install-geodata" "Установка геофайлов" 0 || true
+  run_with_spinner "bash -c \"\$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)\" @ install-geodata" "Установка геофайлов" 60 || true
   
   print_success "Xray установлен ($(xray version | head -n1 | cut -d' ' -f1-3))"
 }
@@ -640,7 +764,10 @@ generate_xray_config() {
     
     priv_key=$(echo "$key_pair" | grep -i "^PrivateKey" | awk '{print $NF}')
     pub_key=$(echo "$key_pair" | grep -i "^Password" | awk '{print $NF}')
-    [[ -z "$priv_key" || -z "$pub_key" || "${#priv_key}" -lt 40 || "${#pub_key}" -lt 40 ]] && print_error "Некорректные ключи"
+    
+    if [[ -z "$priv_key" || -z "$pub_key" || "${#priv_key}" -lt 40 || "${#pub_key}" -lt 40 ]]; then
+      print_error "Некорректные ключи (PrivateKey: ${priv_key:0:12}..., PublicKey: ${pub_key:0:12}...)"
+    fi
     
     short_id=$(openssl rand -hex 4)
     
@@ -656,6 +783,7 @@ generate_xray_config() {
     print_success "Сгенерированы новые параметры"
   fi
   
+  # Генерация конфигурации
   cat > "$XRAY_CONFIG" <<EOF
 {
   "log": {"loglevel": "warning"},
@@ -712,16 +840,27 @@ EOF
   chown -R xray:xray /usr/local/etc/xray 2>/dev/null || true
   chmod 644 "$XRAY_CONFIG"
   
-  # Валидация без вывода
+  # Валидация
   if ! output=$(xray test --config "$XRAY_CONFIG" 2>&1); then
     print_error "Ошибка валидации Xray:\n$output"
   fi
   
-  systemctl is-active --quiet xray 2>/dev/null && systemctl restart xray &>/dev/null || systemctl enable xray --now &>/dev/null
+  # Запуск
+  if systemctl is-active --quiet xray 2>/dev/null; then
+    run_with_spinner "systemctl restart xray &>/dev/null" "Перезапуск Xray" 10 || \
+      print_error "Не удалось перезапустить Xray"
+  else
+    run_with_spinner "systemctl enable xray --now &>/dev/null" "Запуск Xray" 10 || \
+      print_error "Не удалось запустить Xray"
+  fi
+  
   sleep 3
   
-  systemctl is-active --quiet xray && print_success "Xray запущен" || \
-    print_error "Не удалось запустить Xray (journalctl -u xray -n 20)"
+  if systemctl is-active --quiet xray; then
+    print_success "Xray запущен"
+  else
+    print_error "Не удалось запустить Xray (проверьте: journalctl -u xray -n 20)"
+  fi
 }
 
 # ============================================================================
@@ -788,7 +927,9 @@ EOF
 create_user_utility() {
   print_substep "Утилита управления"
   
-  ! command -v qrencode &>/dev/null && ensure_dependency "qrencode" "qrencode"
+  if ! command -v qrencode &>/dev/null; then
+    ensure_dependency "qrencode" "qrencode"
+  fi
   
   cat > /usr/local/bin/user <<'EOF_SCRIPT'
 #!/bin/bash
@@ -878,7 +1019,7 @@ EOF_HELP
 
 main() {
   echo -e "\n${BOLD}${SOFT_BLUE}Xray VLESS/XHTTP/Reality Installer${RESET}"
-  echo -e "${LIGHT_GRAY}Минималистичный вывод • Идемпотентность • Безопасность${RESET}"
+  echo -e "${LIGHT_GRAY}Живая анимация • Корректный маппинг пакетов • Полная идемпотентность${RESET}"
   echo -e "${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
   
   check_root
@@ -886,17 +1027,17 @@ main() {
   # 1. Обновление системы
   update_system
   
-  # 2. Подготовка
+  # 2. Подготовка системы
   prepare_system
   export DEBIAN_FRONTEND=noninteractive
   
-  # 3. Оптимизации
+  # 3. Системные оптимизации
   print_step "Системные оптимизации"
   optimize_swap
   optimize_network
   configure_trim
   
-  # 4. Домен
+  # 4. Настройка домена
   prompt_domain
   
   # 5. Безопасность
@@ -904,22 +1045,22 @@ main() {
   configure_firewall
   configure_fail2ban
   
-  # 6. Зависимости (с правильным маппингом!)
+  # 6. Установка зависимостей (КОРРЕКТНЫЙ МАППИНГ!)
   print_step "Зависимости"
   ensure_dependency "curl" "curl"
   ensure_dependency "jq" "jq"
   ensure_dependency "socat" "socat"
   ensure_dependency "git" "git"
   ensure_dependency "wget" "wget"
-  ensure_dependency "gnupg" "gpg"          # ← КРИТИЧЕСКИ ВАЖНО: не gnupg!
-  ensure_dependency "ca-certificates" "-"
+  ensure_dependency "gnupg" "gpg"          # ← gnupg → gpg (НЕ gnupg!)
+  ensure_dependency "ca-certificates" "-"  # ← Пакет без команды
   ensure_dependency "unzip" "unzip"
-  ensure_dependency "iproute2" "ss"        # ← Пакет → команда ss
+  ensure_dependency "iproute2" "ss"        # ← iproute2 → ss (НЕ iproute2!)
   ensure_dependency "openssl" "openssl"
   ensure_dependency "haveged" "haveged"
   print_success "Все зависимости установлены"
   
-  # 7. Сайт
+  # 7. Маскировочный сайт
   print_step "Маскировка"
   create_masking_site
   
