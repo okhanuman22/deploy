@@ -14,12 +14,6 @@
 ```bash
 curl -fsSL https://raw.githubusercontent.com/okhanuman22/deploy/main/install.sh | sudo -E bash
 ```
-- или
-```bash
-wget https://raw.githubusercontent.com/okhanuman22/deploy/main/install.sh -O install.sh
-chmod +x install.sh
-sudo ./install.sh
-```
 
 ### 👥 Управление пользователями:
 ```txt
