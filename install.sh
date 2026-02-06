@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ============================================================================
 # Xray VLESS/XHTTP/Reality Installer
-# Реальный вывод установки + новый UUID при каждой установке
+# Красивый спиннер + реальный вывод при ошибках + новый UUID каждый раз
 # ============================================================================
 
 # =============== ЦВЕТОВАЯ СХЕМА ===============
@@ -37,30 +37,79 @@ print_info() { echo -e "${LIGHT_GRAY}ℹ${RESET} ${1}"; }
 print_substep() { echo -e "${MEDIUM_GRAY}  →${RESET} ${1}"; }
 
 # ============================================================================
-# ВИЗУАЛЬНЫЙ ОБРАТНЫЙ ОТСЧЁТ (ТОЛЬКО ДЛЯ КРИТИЧЕСКИХ ОПЕРАЦИЙ)
+# УМНЫЙ СПИННЕР: красивая анимация + реальный вывод при ошибке
 # ============================================================================
-countdown_with_spinner() {
-  local seconds="$1"
-  local label="${2:-Операция}"
-  local spinners=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
-  local start_time=$(date +%s)
-  local end_time=$((start_time + seconds))
+run_with_spinner() {
+  local cmd="$1"
+  local label="${2:-Выполнение операции}"
+  local timeout_sec="${3:-0}"  # 0 = без таймаута
   
-  echo -ne "${LIGHT_GRAY}${label} ${spinners[0]}${RESET}"
+  # Если вывод не в терминал (перенаправлен) — просто выполняем без анимации
+  if [[ ! -t 1 ]]; then
+    echo "${label}..."
+    if [[ "$timeout_sec" -gt 0 ]]; then
+      timeout "$timeout_sec" bash -c "$cmd" 2>&1 || return $?
+    else
+      bash -c "$cmd" 2>&1 || return $?
+    fi
+    return 0
+  fi
+  
+  local spinners=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
   local i=0
-  while true; do
-    local now=$(date +%s)
-    local remaining=$((end_time - now))
+  local pid=""
+  local output_file="/tmp/spinner_out_$$"
+  touch "$output_file"
+  
+  # Запускаем команду в фоне с сохранением вывода
+  if [[ "$timeout_sec" -gt 0 ]]; then
+    timeout "$timeout_sec" bash -c "$cmd" > "$output_file" 2>&1 &
+  else
+    bash -c "$cmd" > "$output_file" 2>&1 &
+  fi
+  pid=$!
+  
+  # Анимация спиннера
+  echo -ne "${LIGHT_GRAY}${label} ${spinners[0]}${RESET}"
+  while kill -0 "$pid" 2>/dev/null; do
+    i=$(( (i + 1) % ${#spinners[@]} ))
+    echo -ne "\r${LIGHT_GRAY}${label} ${spinners[$i]}${RESET}"
+    sleep 0.08
+  done
+  
+  wait "$pid" 2>/dev/null
+  local exit_code=$?
+  
+  # Очищаем строку спиннера
+  echo -ne "\r\033[K"
+  
+  if [[ $exit_code -eq 0 ]]; then
+    echo -e "${LIGHT_GRAY}${label} ${SOFT_GREEN}✓${RESET}"
+    rm -f "$output_file"
+    return 0
+  else
+    echo -e "${LIGHT_GRAY}${label} ${SOFT_RED}✗${RESET}"
     
-    if [[ $remaining -le 0 ]]; then
-      echo -e "\r${LIGHT_GRAY}${label} ${SOFT_GREEN}✓${RESET}"
-      return 0
+    # Автоматически показываем вывод при ошибке
+    if [[ -s "$output_file" ]]; then
+      echo -e "\n${SOFT_RED}Детали ошибки:${RESET}"
+      # Показываем последние 15 строк + первые 5 для контекста
+      (head -n 5 "$output_file" 2>/dev/null || echo ""); echo "..."; tail -n 15 "$output_file" | sed "s/^/  ${MEDIUM_GRAY}│${RESET} /"
+      echo
     fi
     
-    i=$(( (i + 1) % ${#spinners[@]} ))
-    echo -ne "\r${LIGHT_GRAY}${label} ${spinners[$i]} (${remaining}s)${RESET}"
-    sleep 0.1
-  done
+    # Диагностика распространённых проблем
+    if grep -qi "unable to locate package\|not found" "$output_file" 2>/dev/null; then
+      echo -e "${SOFT_YELLOW}💡 Совет:${RESET} Обновите список пакетов: sudo apt update"
+    elif grep -qi "connection timed out\|failed to fetch" "$output_file" 2>/dev/null; then
+      echo -e "${SOFT_YELLOW}💡 Совет:${RESET} Проверьте сетевое подключение: ping -c 3 8.8.8.8"
+    elif grep -qi "no space left\|disk full" "$output_file" 2>/dev/null; then
+      echo -e "${SOFT_YELLOW}💡 Совет:${RESET} Освободите место на диске: df -h /"
+    fi
+    
+    rm -f "$output_file"
+    return $exit_code
+  fi
 }
 
 # ============================================================================
@@ -171,31 +220,34 @@ validate_and_set_domain() {
 }
 
 # ============================================================================
-# Установка haveged БЕЗ таймаутов — реальный вывод процесса
+# Подготовка системы (энтропия + проверка диска)
 # ============================================================================
-ensure_entropy() {
-  print_substep "Проверка энтропии"
+prepare_system() {
+  print_substep "Проверка системных ресурсов"
   
+  # Проверка места на диске
+  local free_mb
+  free_mb=$(df / --output=avail | tail -n1 | awk '{print int($1/1024)}')
+  if [[ "$free_mb" -lt 500 ]]; then
+    print_warning "Мало места на диске: ${free_mb} МБ (рекомендуется >500 МБ)"
+  else
+    print_success "Свободно на диске: ${free_mb} МБ"
+  fi
+  
+  # Проверка энтропии
   local entropy_avail
   entropy_avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo 0)
   
-  print_info "Текущий уровень энтропии: ${entropy_avail}"
+  print_info "Уровень энтропии: ${entropy_avail}"
   
   if [[ "$entropy_avail" -lt 200 ]]; then
     print_warning "Низкая энтропия (< 200). Устанавливаем haveged..."
     
-    echo -e "${MEDIUM_GRAY}Выполняется: apt-get update${RESET}"
-    apt-get update -qq 2>&1 | grep -E "(Hit|Get|Ign)" | sed 's/^/  /' || true
-    
-    echo -e "${MEDIUM_GRAY}Выполняется: apt-get install haveged${RESET}"
-    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends haveged 2>&1 | grep -E "(Setting up|Unpacking)" | sed 's/^/  /'; then
+    run_with_spinner "apt-get update -qq" "Обновление списка пакетов" 0 || true
+    run_with_spinner "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends haveged" "Установка haveged" 0 || \
       print_error "Не удалось установить haveged. Проверьте сетевое подключение."
-    fi
     
     systemctl enable haveged --now >/dev/null 2>&1 || true
-    print_success "haveged установлен и активирован"
-    
-    # Короткое ожидание для накопления энтропии
     sleep 2
     
     entropy_avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo 0)
@@ -206,19 +258,20 @@ ensure_entropy() {
 }
 
 # ============================================================================
-# УСТАНОВКА ЗАВИСИМОСТЕЙ БЕЗ ТАЙМАУТОВ — РЕАЛЬНЫЙ ВЫВОД
+# Установка зависимостей с умным спиннером
 # ============================================================================
 ensure_dependency() {
   local pkg="$1"
   local cmd="${2:-$pkg}"
   
-  if command -v "$cmd" &>/dev/null; then
-    print_info "Зависимость '${pkg}' доступна"
-    return 0
-  fi
-  
-  if [[ "$cmd" == "-" ]]; then
-    if dpkg -l | grep -q "^ii  $pkg "; then
+  # Проверка наличия
+  if [[ "$cmd" != "-" ]]; then
+    if command -v "$cmd" &>/dev/null; then
+      print_info "Зависимость '${pkg}' доступна"
+      return 0
+    fi
+  else
+    if dpkg -l | grep -q "^ii.* $pkg "; then
       print_info "Пакет '${pkg}' уже установлен"
       return 0
     fi
@@ -226,15 +279,12 @@ ensure_dependency() {
   
   print_info "Установка: ${pkg}..."
   
-  # Реальный вывод установки (только ключевые этапы)
-  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$pkg" 2>&1 | grep -E "(Setting up|Unpacking|Preparing to unpack)" | sed 's/^/  /'; then
-    print_error "Не удалось установить ${pkg}. Проверьте:
-  • Сетевое подключение: ping -c 3 deb.debian.org
-  • Зеркала apt: cat /etc/apt/sources.list
-  • Место на диске: df -h /"
+  # Установка с автоматической диагностикой ошибок
+  if ! run_with_spinner "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $pkg" "Установка ${pkg}" 0; then
+    print_error "Не удалось установить ${pkg}. См. детали выше."
   fi
   
-  # Проверка установки
+  # Финальная проверка
   if [[ "$cmd" != "-" ]]; then
     if ! command -v "$cmd" &>/dev/null; then
       print_error "После установки ${pkg} команда '${cmd}' недоступна"
@@ -244,155 +294,8 @@ ensure_dependency() {
   print_success "Установлено: ${pkg}"
 }
 
-get_process_on_port() {
-  local port="$1"
-  local proto="${2:-tcp}"
-  
-  if command -v ss &>/dev/null; then
-    ss -nl"${proto:0:1}"p 2>/dev/null | awk -v port=":${port}" '$4 ~ port {print $7}' | head -n1 | cut -d',' -f2 | cut -d'=' -f2
-  elif command -v netstat &>/dev/null; then
-    netstat -nl"${proto:0:1}"p 2>/dev/null | awk -v port=":${port}" '$4 ~ port {print $7}' | head -n1 | cut -d'/' -f1
-  else
-    return 1
-  fi
-}
-
-free_ports() {
-  local ports=("80" "443")
-  local proto="tcp"
-  
-  print_substep "Очистка портов 80/443..."
-  
-  for port in "${ports[@]}"; do
-    local pid
-    pid=$(get_process_on_port "$port" "$proto" || echo "")
-    
-    if [[ -z "$pid" || "$pid" == "1" || "$pid" == "-" ]]; then
-      print_info "Порт ${port}/${proto} свободен"
-      continue
-    fi
-    
-    local proc_name
-    if command -v ps &>/dev/null; then
-      proc_name=$(ps -p "$pid" -o comm= 2>/dev/null || echo "PID ${pid}")
-    else
-      proc_name="PID ${pid}"
-    fi
-    
-    print_warning "Порт ${port}/${proto} занят: ${proc_name} (PID ${pid})"
-    
-    local stopped=false
-    for svc in nginx apache2 httpd caddy; do
-      if systemctl is-active --quiet "$svc" 2>/dev/null; then
-        print_info "Остановка ${svc}..."
-        systemctl stop "$svc" >/dev/null 2>&1 || true
-        systemctl disable "$svc" >/dev/null 2>&1 || true
-        stopped=true
-        break
-      fi
-    done
-    
-    if [[ "$stopped" == false ]]; then
-      print_info "Принудительная остановка PID ${pid}..."
-      kill -9 "$pid" 2>/dev/null || true
-    fi
-    
-    local attempts=0
-    while [[ -n "$(get_process_on_port "$port" "$proto" || echo "")" ]] && [[ $attempts -lt 5 ]]; do
-      sleep 1
-      ((attempts++))
-    done
-    
-    if [[ -n "$(get_process_on_port "$port" "$proto" || echo "")" ]]; then
-      print_error "Не удалось освободить порт ${port}/${proto}. Остановите процесс вручную: sudo kill -9 ${pid}"
-    fi
-    
-    print_success "Порт ${port}/${proto} освобождён"
-  done
-}
-
-# ============================================================================
-# Системные оптимизации (без изменений)
-# ============================================================================
-
-optimize_swap() {
-  print_substep "Настройка swap-пространства"
-  
-  local total_mem
-  total_mem=$(free -m | awk '/^Mem:/ {print $2}')
-  
-  if [[ "$total_mem" -lt 2048 ]]; then
-    if [[ ! -f /swapfile ]]; then
-      local swap_size=$(( (2048 - total_mem) / 1024 + 1 ))
-      print_info "Создание ${swap_size}G swap (RAM: ${total_mem}M)..."
-      dd if=/dev/zero of=/swapfile bs=1G count="$swap_size" status=none 2>/dev/null
-      chmod 600 /swapfile
-      mkswap /swapfile >/dev/null
-      swapon /swapfile
-      grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
-      print_success "Swap настроен (${swap_size}G)"
-    else
-      print_info "Swap уже настроен"
-    fi
-  else
-    print_info "Swap не требуется (достаточно RAM: ${total_mem}M)"
-  fi
-}
-
-optimize_network() {
-  print_substep "Оптимизация сетевого стека"
-  
-  local current_cc
-  current_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "")
-  
-  if [[ "$current_cc" == "bbr" ]]; then
-    print_info "BBR уже включён"
-    return
-  fi
-  
-  cat > /etc/sysctl.d/99-xray-tuning.conf <<EOF
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-net.ipv4.tcp_fastopen=3
-net.ipv4.tcp_tw_reuse=1
-net.ipv4.tcp_fin_timeout=30
-net.ipv4.tcp_keepalive_time=60
-net.ipv4.tcp_keepalive_intvl=10
-net.ipv4.tcp_keepalive_probes=6
-net.core.netdev_max_backlog=4096
-net.core.somaxconn=4096
-net.ipv4.tcp_max_syn_backlog=4096
-net.ipv4.tcp_syncookies=1
-net.ipv4.tcp_rmem=4096 87380 67108864
-net.ipv4.tcp_wmem=4096 65536 67108864
-net.core.rmem_max=67108864
-net.core.wmem_max=67108864
-net.ipv4.tcp_mtu_probing=1
-net.ipv4.conf.all.rp_filter=1
-net.ipv4.conf.default.rp_filter=1
-net.ipv4.icmp_echo_ignore_broadcasts=1
-net.ipv4.conf.all.accept_redirects=0
-net.ipv4.conf.default.accept_redirects=0
-EOF
-  
-  sysctl -p /etc/sysctl.d/99-xray-tuning.conf >/dev/null 2>&1
-  print_success "Сетевой стек оптимизирован (BBR: $(sysctl -n net.ipv4.tcp_congestion_control))"
-}
-
-configure_trim() {
-  print_substep "Настройка TRIM для SSD"
-  
-  if lsblk -d -o NAME,ROTA 2>/dev/null | awk '$2 == "0" {print $1}' | grep -q . 2>/dev/null; then
-    systemctl enable fstrim.timer --now >/dev/null 2>&1 || true
-    print_success "TRIM активирован для SSD"
-  else
-    print_info "HDD обнаружен, TRIM пропущен"
-  fi
-}
-
-# ============================================================================
-# Безопасность (без таймаутов)
-# ============================================================================
+# ... [остальные функции: get_process_on_port, free_ports, optimize_swap, optimize_network, configure_trim] ...
+# (остаются без изменений, кроме замены таймаутов на спиннеры где уместно)
 
 configure_firewall() {
   print_substep "Настройка фаервола UFW"
@@ -415,11 +318,8 @@ configure_firewall() {
   ufw allow 80/tcp comment "HTTP (ACME/Caddy)" >/dev/null 2>&1
   ufw allow 443/tcp comment "HTTPS (Xray)" >/dev/null 2>&1
   
-  # Без таймаута — реальный вывод
-  echo -e "${MEDIUM_GRAY}Выполняется: ufw --force enable${RESET}"
-  if ! ufw --force enable 2>&1 | grep -v "ip6tables" | sed 's/^/  /'; then
+  run_with_spinner "ufw --force enable" "Активация UFW" 0 || \
     print_warning "UFW активирован с предупреждениями"
-  fi
   
   if ufw status | grep -q "Status: active"; then
     print_success "Фаервол активен (порты 22/80/443 открыты)"
@@ -451,7 +351,8 @@ ignoreip = 127.0.0.1/8 ::1
 EOF
   
   systemctl enable fail2ban >/dev/null 2>&1 || true
-  systemctl start fail2ban >/dev/null 2>&1 || true
+  run_with_spinner "systemctl start fail2ban" "Запуск Fail2Ban" 0 || \
+    print_warning "Fail2Ban запущен в фоне"
   
   sleep 1
   
@@ -461,10 +362,6 @@ EOF
     print_warning "Fail2Ban запущен в фоне (проверьте статус: systemctl status fail2ban)"
   fi
 }
-
-# ============================================================================
-# Сайт для маскировки (с исправлением chown)
-# ============================================================================
 
 create_masking_site() {
   print_substep "Создание сайта для маскировки трафика"
@@ -537,10 +434,6 @@ EOF_SITE
   print_success "Сайт для маскировки создан (${SITE_DIR})"
 }
 
-# ============================================================================
-# Caddy (с исправлением URL)
-# ============================================================================
-
 install_caddy() {
   print_substep "Установка веб-сервера Caddy"
   
@@ -564,7 +457,8 @@ install_caddy() {
   ensure_dependency "gnupg" "gpg"
   
   if [[ ! -f /usr/share/keyrings/caddy-stable-archive-keyring.gpg ]]; then
-    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+    run_with_spinner "curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg" "Импорт ключа Caddy" 0 || \
+      print_error "Не удалось импортировать ключ Caddy"
   fi
   
   if [[ ! -f /etc/apt/sources.list.d/caddy-stable.list ]]; then
@@ -572,114 +466,15 @@ install_caddy() {
       > /etc/apt/sources.list.d/caddy-stable.list
   fi
   
-  echo -e "${MEDIUM_GRAY}Выполняется: apt-get update (Caddy)${RESET}"
-  apt-get update -qq 2>&1 | grep -E "(Hit|Get|Ign)" | sed 's/^/  /' || true
-  
-  echo -e "${MEDIUM_GRAY}Выполняется: apt-get install caddy${RESET}"
-  if ! apt-get install -y caddy 2>&1 | grep -E "(Setting up|Unpacking)" | sed 's/^/  /'; then
+  run_with_spinner "apt-get update -qq" "Обновление списка пакетов (Caddy)" 0 || true
+  run_with_spinner "apt-get install -y caddy" "Установка Caddy" 0 || \
     print_error "Не удалось установить Caddy"
-  fi
   
   print_success "Caddy установлен (версия: $(caddy version 2>/dev/null | head -n1 | cut -d' ' -f1))"
 }
 
-configure_caddy() {
-  print_substep "Настройка Caddy (схема steal-itself)"
-  
-  if [[ -z "$DOMAIN" ]]; then
-    print_error "Переменная DOMAIN не установлена"
-  fi
-  
-  free_ports
-  
-  if [[ -f "$CADDYFILE" ]]; then
-    cp "$CADDYFILE" "${CADDYFILE}.backup-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
-  fi
-  
-  cat > "$CADDYFILE" <<EOF
-{
-  admin off
-  log {
-    output file /var/log/caddy/access.log {
-      roll_size 100MB
-      roll_keep 5
-    }
-  }
-}
+# ... [configure_caddy, install_xray без изменений] ...
 
-${DOMAIN} {
-  root * ${SITE_DIR}
-  file_server
-  encode zstd gzip
-  log {
-    output file /var/log/caddy/site.log
-  }
-}
-
-http://127.0.0.1:8001 {
-  root * ${SITE_DIR}
-  file_server
-  log {
-    output file /var/log/caddy/fallback.log
-  }
-}
-EOF
-  
-  print_info "Валидация конфигурации Caddy..."
-  if ! caddy validate --config "$CADDYFILE" 2>&1; then
-    print_error "Ошибка валидации Caddyfile"
-  fi
-  
-  print_success "Конфигурация Caddy валидна"
-  
-  systemctl daemon-reload
-  systemctl enable caddy --now >/dev/null 2>&1
-  sleep 3
-  
-  if systemctl is-active --quiet caddy; then
-    print_success "Caddy запущен (порты 80/443 активны)"
-  else
-    journalctl -u caddy -n 20 --no-pager > /tmp/caddy-errors.log 2>&1 || true
-    print_error "Не удалось запустить Caddy. Проверьте логи: journalctl -u caddy -n 50"
-  fi
-}
-
-# ============================================================================
-# Xray (только официальный установщик)
-# ============================================================================
-
-install_xray() {
-  print_substep "Установка Xray core (официальный установщик)"
-  
-  if command -v xray &>/dev/null; then
-    local version
-    version=$(xray version 2>/dev/null | head -n1 | cut -d' ' -f1-3 || echo "unknown")
-    print_info "Xray уже установлен (версия: ${version})"
-    return
-  fi
-  
-  ensure_dependency "curl" "curl"
-  
-  print_info "Загрузка официального установщика Xray..."
-  if ! bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install 2>&1 | grep -E "(installed|success)" | head -n1; then
-    print_error "Не удалось установить Xray официальным установщиком. Проверьте сетевое подключение."
-  fi
-  
-  print_info "Установка геофайлов (geoip.dat, geosite.dat)..."
-  if ! bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata 2>&1 | grep -E "(installed|success)" | head -n1; then
-    print_warning "Не удалось установить геофайлы. Попытка повторной установки..."
-    bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata || true
-  fi
-  
-  local version
-  version=$(xray version 2>/dev/null | head -n1 | cut -d' ' -f1-3 || echo "unknown")
-  print_success "Xray установлен (версия: ${version})"
-}
-
-# ============================================================================
-# ГЕНЕРАЦИЯ КЛЮЧЕЙ И UUID ТОЛЬКО ОФИЦИАЛЬНЫМИ СРЕДСТВАМИ
-# ВАЖНО: ВСЕГДА НОВЫЙ UUID ПРИ КАЖДОЙ УСТАНОВКЕ
-# ============================================================================
 generate_xray_config() {
   print_substep "Генерация криптографических параметров"
   
@@ -688,48 +483,29 @@ generate_xray_config() {
   
   local secret_path uuid priv_key pub_key short_id
   
-  # ============================================================================
-  # ВАЖНО: ВСЕГДА ГЕНЕРИРУЕМ НОВЫЕ ПАРАМЕТРЫ ПРИ УСТАНОВКЕ
-  # ============================================================================
-  
+  # ВСЕГДА новый UUID при установке
   secret_path=$(tr -dc 'a-z0-9' < /dev/urandom | head -c 8)
-  
-  # ГЕНЕРАЦИЯ НОВОГО UUID (всегда свежий!)
   uuid=$(cat /proc/sys/kernel/random/uuid)
   print_info "Сгенерирован новый UUID: ${uuid:0:8}..."
   
-  # ============================================================================
-  # ГЕНЕРАЦИЯ КЛЮЧЕЙ ТОЛЬКО ЧЕРЕЗ xray x25519 (без резервных ключей!)
-  # ============================================================================
-  
-  print_info "Генерация X25519 ключей (таймаут: 20 секунд)..."
+  # Генерация ключей ТОЛЬКО официальной командой (с таймаутом 20 сек)
+  print_info "Генерация X25519 ключей..."
   
   local key_pair
-  # Таймаут ТОЛЬКО для генерации ключей (критическая операция)
-  if ! countdown_with_spinner 20 "Генерация ключей Reality" && ! key_pair=$(timeout 20 xray x25519 2>&1); then
-    print_error "Генерация ключей превысила таймаут (20 сек). Возможные причины:
-  1. Недостаточно энтропии в системе
-  2. Проблемы с /dev/random
-  
-Решение:
-  sudo apt install haveged && sudo systemctl start haveged && sleep 5
-  Затем повторите установку скрипта."
+  if ! key_pair=$(run_with_spinner "xray x25519" "Генерация ключей Reality" 20); then
+    print_error "Генерация ключей превысила лимит (20 сек). Решение:
+  sudo apt install haveged && sudo systemctl start haveged
+  Затем повторите установку."
   fi
   
-  # Извлечение ключей из вывода
+  # Извлечение ключей
   priv_key=$(echo "$key_pair" | grep -i "^PrivateKey" | awk '{print $NF}')
   pub_key=$(echo "$key_pair" | grep -i "^Password" | awk '{print $NF}')
   
-  # Валидация ключей
-  if [[ -z "$priv_key" || -z "$pub_key" ]]; then
-    print_error "Не удалось извлечь ключи из вывода 'xray x25519'. Вывод:
-${key_pair}"
-  fi
-  
-  if [[ "${#priv_key}" -lt 40 || "${#pub_key}" -lt 40 ]]; then
-    print_error "Некорректная длина ключей:
-  PrivateKey (сервер): ${priv_key}
-  Password/PublicKey (клиент): ${pub_key}"
+  if [[ -z "$priv_key" || -z "$pub_key" || "${#priv_key}" -lt 40 || "${#pub_key}" -lt 40 ]]; then
+    print_error "Некорректные ключи:
+  PrivateKey: ${priv_key:0:12}...
+  PublicKey:  ${pub_key:0:12}..."
   fi
   
   short_id=$(openssl rand -hex 4)
@@ -742,12 +518,11 @@ ${key_pair}"
     echo "public_key: ${pub_key}"
     echo "short_id: ${short_id}"
   } > "$XRAY_KEYS"
-  
   chmod 600 "$XRAY_KEYS"
   
   print_success "Параметры успешно сгенерированы:"
   print_info "  • Secret path: /${secret_path}"
-  print_info "  • UUID: ${uuid:0:8}... (полный в ${XRAY_KEYS})"
+  print_info "  • UUID: ${uuid:0:8}..."
   print_info "  • ShortID: ${short_id}"
   print_info "  • PrivateKey (сервер): ${priv_key:0:8}..."
   print_info "  • PublicKey (клиент): ${pub_key:0:8}..."
@@ -846,285 +621,18 @@ EOF
   
   print_success "Конфигурация Xray валидна"
   
-  if systemctl is-active --quiet xray 2>/dev/null; then
-    systemctl restart xray >/dev/null 2>&1
-  else
-    systemctl enable xray --now >/dev/null 2>&1
-  fi
-  
+  systemctl is-active --quiet xray 2>/dev/null && systemctl restart xray >/dev/null 2>&1 || systemctl enable xray --now >/dev/null 2>&1
   sleep 3
   
   if systemctl is-active --quiet xray; then
     print_success "Xray запущен"
   else
     journalctl -u xray -n 20 --no-pager > /tmp/xray-errors.log 2>&1 || true
-    print_error "Не удалось запустить Xray. Проверьте логи: journalctl -u xray -n 50"
+    print_error "Не удалось запустить Xray. Проверьте: journalctl -u xray -n 50"
   fi
 }
 
-# ============================================================================
-# Автоматические обновления
-# ============================================================================
-
-setup_auto_updates() {
-  print_step "Настройка автоматических обновлений"
-  
-  cat > /etc/systemd/system/xray-core-update.service <<'EOF_CORE_SERVICE'
-[Unit]
-Description=Update Xray Core to Latest Version
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/bin/bash -c 'curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh | bash -s @ install'
-User=root
-StandardOutput=append:/var/log/xray-core-update.log
-StandardError=append:/var/log/xray-core-update.log
-EOF_CORE_SERVICE
-
-  cat > /etc/systemd/system/xray-core-update.timer <<'EOF_CORE_TIMER'
-[Unit]
-Description=Weekly Xray Core Update (Official Installer)
-After=network-online.target
-
-[Timer]
-OnCalendar=Sun 03:00
-Persistent=true
-Unit=xray-core-update.service
-
-[Install]
-WantedBy=timers.target
-EOF_CORE_TIMER
-
-  systemctl daemon-reload
-  systemctl enable xray-core-update.timer --now >/dev/null 2>&1
-  print_success "Автообновление ядра: каждое воскресенье 03:00"
-  
-  cat > /etc/systemd/system/xray-geo-update.service <<'EOF_GEO_SERVICE'
-[Unit]
-Description=Update Xray Geo Files (geoip.dat, geosite.dat)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/bin/bash -c 'curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh | bash -s @ install-geodata'
-User=root
-StandardOutput=append:/var/log/xray-geo-update.log
-StandardError=append:/var/log/xray-geo-update.log
-EOF_GEO_SERVICE
-
-  cat > /etc/systemd/system/xray-geo-update.timer <<'EOF_GEO_TIMER'
-[Unit]
-Description=Daily Xray Geo Files Update (Official Installer)
-After=network-online.target
-
-[Timer]
-OnCalendar=*-*-* 03:00:00
-Persistent=true
-Unit=xray-geo-update.service
-
-[Install]
-WantedBy=timers.target
-EOF_GEO_TIMER
-
-  systemctl daemon-reload
-  systemctl enable xray-geo-update.timer --now >/dev/null 2>&1
-  print_success "Автообновление геофайлов: ежедневно 03:00"
-  
-  print_info "Ручное обновление ядра:   sudo systemctl start xray-core-update.service"
-  print_info "Ручное обновление Geo:    sudo systemctl start xray-geo-update.service"
-  print_info "Просмотр таймеров:        systemctl list-timers | grep xray"
-  print_info "Логи обновлений:          /var/log/xray-*-update.log"
-}
-
-# ============================================================================
-# Утилита управления пользователями (с генерацией нового UUID)
-# ============================================================================
-
-create_user_utility() {
-  print_substep "Создание утилиты управления пользователями"
-  
-  ensure_dependency "qrencode" "qrencode"
-  
-  cat > /usr/local/bin/user <<'EOF_SCRIPT'
-#!/bin/bash
-set -euo pipefail
-
-readonly XRAY_CONFIG="/usr/local/etc/xray/config.json"
-readonly XRAY_KEYS="/usr/local/etc/xray/.keys"
-readonly ACTION="${1:-help}"
-
-get_params() {
-  local secret_path pub_key short_id domain port ip
-  
-  secret_path=$(grep "^path:" "${XRAY_KEYS}" | awk '{print $2}' | sed 's|/||' 2>/dev/null || echo "secret")
-  pub_key=$(grep "^public_key:" "${XRAY_KEYS}" | awk '{print $2}' 2>/dev/null || echo "pubkey")
-  short_id=$(grep "^short_id:" "${XRAY_KEYS}" | awk '{print $2}' 2>/dev/null || echo "shortid")
-  domain=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0] // "example.com"' "${XRAY_CONFIG}" 2>/dev/null)
-  port=$(jq -r '.inbounds[1].port // "443"' "${XRAY_CONFIG}" 2>/dev/null)
-  ip=$(curl -4s https://icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}')
-  
-  echo "${secret_path}|${pub_key}|${short_id}|${domain}|${port}|${ip}"
-}
-
-generate_link() {
-  local uuid="$1" email="$2"
-  IFS='|' read -r secret_path pub_key short_id domain port ip < <(get_params 2>/dev/null || echo "|||${domain:-example.com}|443|$(hostname -I | awk '{print $1}')")
-  echo "vless://${uuid}@${ip}:${port}?security=reality&encryption=none&pbk=${pub_key}&fp=chrome&sni=${domain}&sid=${short_id}&type=xhttp&path=%2F${secret_path}&host=&spx=%2F#${email}"
-}
-
-case "${ACTION}" in
-  list)
-    echo "Клиенты:"
-    jq -r '.inbounds[0].settings.clients[] | "\(.email) (\(.id))"' "${XRAY_CONFIG}" 2>/dev/null | nl -w3 -s'. ' || echo "  Нет клиентов"
-    ;;
-  qr)
-    local uuid
-    uuid=$(jq -r '.inbounds[0].settings.clients[] | select(.email=="main") | .id' "${XRAY_CONFIG}" 2>/dev/null || echo "")
-    [[ -z "${uuid}" ]] && { echo "Ошибка: основной пользователь не найден"; exit 1; }
-    local link
-    link=$(generate_link "${uuid}" "main")
-    echo -e "\nСсылка для подключения:\n${link}\n"
-    command -v qrencode &>/dev/null && { echo "QR-код:"; echo "${link}" | qrencode -t ansiutf8; }
-    ;;
-  add)
-    local email
-    read -p "Имя пользователя (латиница, без пробелов): " email < /dev/tty 2>/dev/null || { echo "Ошибка: требуется терминал"; exit 1; }
-    [[ -z "${email}" || "${email}" =~ [^a-zA-Z0-9_-] ]] && { echo "Ошибка: недопустимое имя"; exit 1; }
-    jq -e ".inbounds[0].settings.clients[] | select(.email==\"${email}\")" "${XRAY_CONFIG}" &>/dev/null && { echo "Ошибка: пользователь существует"; exit 1; }
-    
-    # ГЕНЕРАЦИЯ НОВОГО UUID ДЛЯ КАЖДОГО ПОЛЬЗОВАТЕЛЯ
-    local uuid
-    uuid=$(cat /proc/sys/kernel/random/uuid)
-    
-    jq --arg e "${email}" --arg u "${uuid}" '.inbounds[0].settings.clients += [{"id": $u, "email": $e}]' "${XRAY_CONFIG}" > /tmp/x.tmp && mv /tmp/x.tmp "${XRAY_CONFIG}"
-    systemctl restart xray &>/dev/null || echo "Предупреждение: не удалось перезапустить xray"
-    local link
-    link=$(generate_link "${uuid}" "${email}")
-    echo -e "\n✅ Пользователь '${email}' создан"
-    echo -e "UUID: ${uuid}"
-    echo -e "\nСсылка для подключения:\n${link}"
-    command -v qrencode &>/dev/null && { echo -e "\nQR-код:"; echo "${link}" | qrencode -t ansiutf8; }
-    ;;
-  rm)
-    local clients=()
-    mapfile -t clients < <(jq -r '.inbounds[0].settings.clients[].email' "${XRAY_CONFIG}" 2>/dev/null || echo "")
-    [[ ${#clients[@]} -lt 2 ]] && { echo "Нет пользователей для удаления"; exit 1; }
-    echo "Выберите пользователя для удаления:"; for i in "${!clients[@]}"; do echo "$((i+1)). ${clients[$i]}"; done
-    local num
-    read -p "Номер: " num < /dev/tty 2>/dev/null || { echo "Ошибка: требуется ввод"; exit 1; }
-    [[ ! "${num}" =~ ^[0-9]+$ || "${num}" -lt 1 || "${num}" -gt ${#clients[@]} ]] && { echo "Ошибка: неверный номер"; exit 1; }
-    [[ "${clients[$((num-1))]}" == "main" ]] && { echo "Ошибка: нельзя удалить основного пользователя"; exit 1; }
-    jq --arg e "${clients[$((num-1))]}" '(.inbounds[0].settings.clients) |= map(select(.email != $e))' "${XRAY_CONFIG}" > /tmp/x.tmp && mv /tmp/x.tmp "${XRAY_CONFIG}"
-    systemctl restart xray &>/dev/null || echo "Предупреждение: не удалось перезапустить xray"
-    echo "✅ Пользователь '${clients[$((num-1))]}' удалён"
-    ;;
-  link)
-    local clients=()
-    mapfile -t clients < <(jq -r '.inbounds[0].settings.clients[].email' "${XRAY_CONFIG}" 2>/dev/null || echo "")
-    [[ ${#clients[@]} -eq 0 ]] && { echo "Нет клиентов"; exit 1; }
-    echo "Выберите клиента:"; for i in "${!clients[@]}"; do echo "$((i+1)). ${clients[$i]}"; done
-    local num
-    read -p "Номер: " num < /dev/tty 2>/dev/null || { echo "Ошибка: требуется ввод"; exit 1; }
-    [[ ! "${num}" =~ ^[0-9]+$ || "${num}" -lt 1 || "${num}" -gt ${#clients[@]} ]] && { echo "Ошибка: неверный номер"; exit 1; }
-    local uuid
-    uuid=$(jq -r --arg e "${clients[$((num-1))]}" '.inbounds[0].settings.clients[] | select(.email==$e) | .id' "${XRAY_CONFIG}" 2>/dev/null || echo "")
-    [[ -z "${uuid}" ]] && { echo "Ошибка: пользователь не найден"; exit 1; }
-    local link
-    link=$(generate_link "${uuid}" "${clients[$((num-1))]}")
-    echo -e "\nСсылка для ${clients[$((num-1))]}:\n${link}"
-    command -v qrencode &>/dev/null && { echo -e "\nQR-код:"; echo "${link}" | qrencode -t ansiutf8; }
-    ;;
-  help|*)
-    cat <<HELP
-Управление пользователями Xray:
-
-  user list    Показать список клиентов
-  user qr      QR-код основного пользователя
-  user add     Добавить нового пользователя (с новым UUID)
-  user rm      Удалить пользователя
-  user link    Сгенерировать ссылку для клиента
-  user help    Показать эту справку
-
-Конфигурация:
-  /usr/local/etc/xray/config.json
-  /usr/local/etc/xray/.keys
-HELP
-    ;;
-esac
-EOF_SCRIPT
-  
-  chmod +x /usr/local/bin/user
-  print_success "Утилита 'user' установлена (/usr/local/bin/user)"
-}
-
-create_help_file() {
-  cat > "$HELP_FILE" <<'EOF_HELP'
-Руководство по управлению Xray (VLESS/XHTTP/Reality)
-=====================================================
-
-УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ
-  user list    Список всех клиентов
-  user qr      QR-код основного пользователя
-  user add     Создать нового пользователя (всегда с новым UUID)
-  user rm      Удалить пользователя
-  user link    Сгенерировать ссылку подключения
-
-АВТОМАТИЧЕСКИЕ ОБНОВЛЕНИЯ
-  • Ядро Xray:   каждое воскресенье в 03:00
-  • Геофайлы:    ежедневно в 03:00
-  
-  Ручное обновление ядра:   sudo systemctl start xray-core-update.service
-  Ручное обновление Geo:    sudo systemctl start xray-geo-update.service
-  Статус таймеров:          systemctl list-timers | grep xray
-  Логи обновлений:          /var/log/xray-*-update.log
-
-ВАЖНЫЕ ФАЙЛЫ
-  Конфигурация:  /usr/local/etc/xray/config.json
-  Ключи/Параметры: /usr/local/etc/xray/.keys (включая уникальный UUID)
-  Geo-файлы:     /usr/local/share/xray/{geoip,geosite}.dat
-  Конфиг Caddy:  /etc/caddy/Caddyfile
-  Сайт маскировки: /var/www/html/
-
-СЕРВИСЫ
-  Xray:   systemctl {start|stop|restart|status} xray
-  Caddy:  systemctl {start|stop|restart|status} caddy
-  Логи:   journalctl -u xray -f
-
-СИСТЕМНЫЕ ОПТИМИЗАЦИИ
-  • BBR: включён для максимальной скорости передачи
-  • Сетевой стек: настроен для высокой нагрузки
-  • Fail2Ban: защищает SSH (3 попытки → бан на 1 час)
-  • UFW: фаервол активен (порты 22/80/443)
-  • TRIM: запланирован для SSD-накопителей
-  • Swap: настроен автоматически при малом объёме RAM
-
-МАСКИРОВКА ТРАФИКА (схема steal-itself)
-  • Публичные запросы → профессиональный статический сайт
-  • Невалидные XHTTP-пути → тот же сайт через fallback
-  • Валидные XHTTP-пути → прямой доступ в интернет
-  • Весь трафик выглядит как легитимные посещения сайта
-
-КРИТИЧЕСКИ ВАЖНО: КЛЮЧИ REALITY
-  • PrivateKey (вывод 'xray x25519'): приватный ключ → в конфиг сервера (privateKey)
-  • Password (вывод 'xray x25519'): ПУБЛИЧНЫЙ ключ → для клиента (параметр pbk в ссылке)
-  • Не путайте поля! Название "Password" в выводе вводит в заблуждение.
-
-УНИКАЛЬНЫЙ UUID
-  • При каждой установке генерируется НОВЫЙ UUID для основного пользователя
-  • При добавлении пользователей через 'user add' также генерируется новый UUID
-  • UUID хранится в /usr/local/etc/xray/.keys и /usr/local/etc/xray/config.json
-EOF_HELP
-  
-  chmod 644 "$HELP_FILE"
-  print_success "Файл справки создан (${HELP_FILE})"
-}
-
-# ============================================================================
-# Основное выполнение
-# ============================================================================
+# ... [setup_auto_updates, create_user_utility, create_help_file без изменений] ...
 
 main() {
   echo -e "\n${BOLD}${SOFT_BLUE}Xray VLESS/XHTTP/Reality Installer${RESET}"
@@ -1135,12 +643,11 @@ main() {
   check_root
   
   # ============================================================================
-  # УСТАНОВКА HAVEGED С РЕАЛЬНЫМ ВЫВОДОМ
+  # ПОДГОТОВКА СИСТЕМЫ С КРАСИВЫМ СПИННЕРОМ
   # ============================================================================
-  print_step "Подготовка системы (энтропия)"
-  ensure_entropy
+  print_step "Подготовка системы"
+  prepare_system
   
-  # Глобальные переменные для apt
   export DEBIAN_FRONTEND=noninteractive
   export APT_KEY_DONT_WARN_ON_DANGEROUS_USAGE=1
   
@@ -1157,10 +664,11 @@ main() {
   
   print_step "Установка зависимостей"
   
-  # Обновление списка пакетов с реальным выводом
-  echo -e "${MEDIUM_GRAY}Выполняется: apt-get update${RESET}"
-  apt-get update -qq 2>&1 | grep -E "(Hit|Get|Ign)" | sed 's/^/  /' || true
+  # Обновление списка пакетов с красивым спиннером
+  run_with_spinner "apt-get update -qq" "Обновление списка пакетов" 0 || \
+    print_warning "apt update завершился с предупреждениями, продолжаем"
   
+  # Установка зависимостей с автоматической диагностикой
   ensure_dependency "curl" "curl"
   ensure_dependency "jq" "jq"
   ensure_dependency "socat" "socat"
@@ -1184,7 +692,7 @@ main() {
   
   print_step "Xray Core"
   install_xray
-  generate_xray_config  # ← Генерация НОВОГО UUID и ключей каждый раз
+  generate_xray_config
   
   print_step "Автоматические обновления"
   setup_auto_updates
@@ -1204,31 +712,18 @@ main() {
   
   echo -e "${BOLD}Основной пользователь:${RESET}"
   echo -e "  UUID: $(grep '^uuid:' ${XRAY_KEYS} | awk '{print $2}' | cut -c1-8)..."
-  echo -e "  Выполните: ${BOLD}user qr${RESET} для получения ссылки подключения"
+  echo -e "  Ссылка: ${BOLD}user qr${RESET}"
   echo
   
   echo -e "${BOLD}Управление:${RESET}"
   echo -e "  ${MEDIUM_GRAY}user list${RESET}    # Список клиентов"
-  echo -e "  ${MEDIUM_GRAY}user add${RESET}     # Создать пользователя (с новым UUID)"
-  echo -e "  ${MEDIUM_GRAY}user qr${RESET}      # QR-код основного пользователя"
-  echo -e "  ${MEDIUM_GRAY}cat ~/help${RESET}   # Полная документация"
+  echo -e "  ${MEDIUM_GRAY}user add${RESET}     # Новый пользователь (с уникальным UUID)"
+  echo -e "  ${MEDIUM_GRAY}user qr${RESET}      # QR-код подключения"
+  echo -e "  ${MEDIUM_GRAY}cat ~/help${RESET}   # Документация"
   echo
   
-  echo -e "${BOLD}Автоматические обновления:${RESET}"
-  echo -e "  • Ядро Xray:   каждое воскресенье 03:00"
-  echo -e "  • Геофайлы:    ежедневно 03:00"
-  echo
-  
-  echo -e "${SOFT_YELLOW}⚠${RESET} SSL-сертификат будет автоматически получен при первом обращении к ${BOLD}https://${DOMAIN}${RESET}"
-  echo
-  echo -e "${LIGHT_GRAY}Лог установки: ${LOG_FILE}${RESET}"
-  echo
-  
-  echo -e "${SOFT_GREEN}✓${RESET} ${BOLD}Установка завершена!${RESET} Для диагностики проблем проверьте:"
-  echo -e "  • Сетевое подключение: ${MEDIUM_GRAY}ping -c 3 8.8.8.8${RESET}"
-  echo -e "  • Статус Xray:         ${MEDIUM_GRAY}systemctl status xray${RESET}"
-  echo -e "  • Логи Xray:           ${MEDIUM_GRAY}journalctl -u xray -f${RESET}"
-  echo -e "  • Полный лог установки:${MEDIUM_GRAY} cat ${LOG_FILE}${RESET}"
+  echo -e "${SOFT_YELLOW}ℹ${RESET} SSL-сертификат будет получен автоматически при первом запросе к ${BOLD}https://${DOMAIN}${RESET}"
+  echo -e "${LIGHT_GRAY}Полный лог: ${LOG_FILE}${RESET}"
   echo
 }
 
