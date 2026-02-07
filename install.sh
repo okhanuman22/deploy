@@ -738,71 +738,70 @@ generate_xray_config() {
   
   local tmp_config="/tmp/xray-config-$$-${RANDOM}.json"
   
-  # ← ИЗМЕНЕНО: Steal-Itself конфигурация с fallback
-  # - dest: внешний домен для маскировки TLS (microsoft.com)
-  # - fallback: на localhost:Caddy для невалидных запросов
-  jq -n \
-    --arg uuid "$uuid" \
-    --arg domain "$DOMAIN" \
-    --arg dest_domain "$DEST_DOMAIN" \
-    --arg priv_key "$priv_key" \
-    --arg short_id "$short_id" \
-    --arg fallback_port "$FALLBACK_PORT" \
-    '{
-      "log": {"loglevel": "warning"},
-      "routing": {
-        "domainStrategy": "IPIfNonMatch",
-        "rules": [
-          {"type": "field", "domain": ["geosite:category-ads-all"], "outboundTag": "block"},
-          {"type": "field", "ip": ["geoip:private", "geoip:cn"], "outboundTag": "block"}
-        ]
-      },
-      "inbounds": [
-        {
-          "listen": "0.0.0.0",
-          "port": 443,
-          "protocol": "vless",
-          "settings": {
-            "clients": [
-              {
-                "id": $uuid,
-                "flow": "xtls-rprx-vision",
-                "email": "main"
-              }
-            ],
-            "decryption": "none",
-            "fallbacks": [
-              {
-                "dest": "127.0.0.1:" + $fallback_port,
-                "xver": 0
-              }
-            ]
-          },
-          "streamSettings": {
-            "network": "tcp",
-            "security": "reality",
-            "realitySettings": {
-              "show": false,
-              "dest": ($dest_domain + ":443"),
-              "serverNames": [
-                $domain,
-                $dest_domain
-              ],
-              "privateKey": $priv_key,
-              "shortIds": [$short_id]
-            }
-          },
-          "sniffing": {
-            "enabled": true,
-            "destOverride": ["http", "tls", "quic"]
-          }
-        }
-      ],
-      "outbounds": [
-        {"protocol": "freedom", "tag": "direct"},
-        {"protocol": "blackhole", "tag": "block"}
+# ← ИЗМЕНЕНО: Steal-Itself конфигурация с fallback
+# Исправлено: jq не поддерживает + для конкатенации внутри объекта
+jq -n \
+  --arg uuid "$uuid" \
+  --arg domain "$DOMAIN" \
+  --arg dest_domain "$DEST_DOMAIN" \
+  --arg priv_key "$priv_key" \
+  --arg short_id "$short_id" \
+  --arg fallback_dest "127.0.0.1:${FALLBACK_PORT}" \
+  '{
+    "log": {"loglevel": "warning"},
+    "routing": {
+      "domainStrategy": "IPIfNonMatch",
+      "rules": [
+        {"type": "field", "domain": ["geosite:category-ads-all"], "outboundTag": "block"},
+        {"type": "field", "ip": ["geoip:private", "geoip:cn"], "outboundTag": "block"}
       ]
-    }' > "$tmp_config"
+    },
+    "inbounds": [
+      {
+        "listen": "0.0.0.0",
+        "port": 443,
+        "protocol": "vless",
+        "settings": {
+          "clients": [
+            {
+              "id": $uuid,
+              "flow": "xtls-rprx-vision",
+              "email": "main"
+            }
+          ],
+          "decryption": "none",
+          "fallbacks": [
+            {
+              "dest": $fallback_dest,
+              "xver": 0
+            }
+          ]
+        },
+        "streamSettings": {
+          "network": "tcp",
+          "security": "reality",
+          "realitySettings": {
+            "show": false,
+            "dest": ($dest_domain + ":443"),
+            "serverNames": [
+              $domain,
+              $dest_domain
+            ],
+            "privateKey": $priv_key,
+            "shortIds": [$short_id]
+          }
+        },
+        "sniffing": {
+          "enabled": true,
+          "destOverride": ["http", "tls", "quic"]
+        }
+      }
+    ],
+    "outbounds": [
+      {"protocol": "freedom", "tag": "direct"},
+      {"protocol": "blackhole", "tag": "block"}
+    ]
+  }' > "$tmp_config"
   
   [[ ! -s "$tmp_config" ]] && print_error "Временный файл пустой"
   
