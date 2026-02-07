@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# Xray VLESS/Vision/Reality + XHTTP Installer (v4.1 — исправлена схема подключения)
+# Xray VLESS/Vision/Reality Installer (v4.2 — правильный Reality dest)
 # ============================================================================
 DARK_GRAY='\033[38;5;242m'
 SOFT_BLUE='\033[38;5;67m'
@@ -115,6 +115,7 @@ readonly SITE_DIR="/var/www/html"
 readonly HELP_FILE="${HOME}/help"
 
 export DOMAIN="${DOMAIN:-}"
+export DEST_DOMAIN="${DEST_DOMAIN:-www.microsoft.com}"  # ИСПРАВЛЕНО: внешний dest для Reality
 SERVER_IP=""
 REBOOT_REQUIRED=0
 
@@ -562,6 +563,7 @@ install_caddy() {
       systemctl stop "$svc" &>/dev/null; systemctl disable "$svc" &>/dev/null
     }
   done
+  # ИСПРАВЛЕНО: освобождаем только порт 80
   for port in 80; do
     local pid=$(ss -tlnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p {print $7}' | head -n1 | cut -d',' -f2 | cut -d'=' -f2 || echo "")
     [[ -n "$pid" && "$pid" != "1" && "$pid" != "-" ]] && kill -9 "$pid" 2>/dev/null || true
@@ -595,15 +597,15 @@ configure_caddy() {
     useradd -r -s /usr/sbin/nologin -d /var/lib/caddy -U caddy 2>/dev/null || true
   fi
 
-  # Caddy только на localhost:8080 для fallback
+  # ИСПРАВЛЕНО: Caddy только на 80 порт (HTTP), без HTTPS
+  # Reality сам обрабатывает TLS на 443!
   cat > "$CADDYFILE" <<EOF
 {
     admin off
-    local_certs
     auto_https off
 }
-:8080 {
-    bind 127.0.0.1
+:80 {
+    bind 0.0.0.0
     root * ${SITE_DIR}
     file_server
     encode zstd gzip
@@ -637,7 +639,7 @@ EOF
   sleep 2
   
   if systemctl is-active --quiet caddy; then
-    print_success "Caddy запущен на 127.0.0.1:8080"
+    print_success "Caddy запущен на порту 80 (HTTP)"
   else
     journalctl -u caddy -n 30 --no-pager | tail -n 25 | sed "s/^/  ${MEDIUM_GRAY}│${RESET} /"
     print_error "Caddy не запущен"
@@ -681,11 +683,12 @@ generate_uuid_safe() {
   echo "$uuid"
 }
 
-# ИСПРАВЛЕНО: правильная схема VLESS + Vision + Reality (без XHTTP!)
+# ИСПРАВЛЕНО: правильная конфигурация Reality
 generate_xray_config() {
   print_substep "Генерация конфигурации"
   [[ -z "${DOMAIN:-}" ]] && print_error "CRITICAL: DOMAIN пустой!"
   print_debug "DOMAIN = [$DOMAIN]"
+  print_debug "DEST_DOMAIN = [$DEST_DOMAIN]"
   
   mkdir -p /usr/local/etc/xray "$XRAY_DAT_DIR"
   local uuid priv_key pub_key short_id
@@ -735,11 +738,14 @@ generate_xray_config() {
   
   local tmp_config="/tmp/xray-config-$$-${RANDOM}.json"
   
-  # ИСПРАВЛЕНО: VLESS + Vision + Reality (flow: xtls-rprx-vision)
-  # Это стабильная и рабочая комбинация!
+  # ИСПРАВЛЕНО: правильная конфигурация Reality
+  # - dest: внешний домен (www.microsoft.com) для маскировки TLS fingerprint
+  # - serverNames: наш домен для подключения клиентов
+  # - xver: 0 (без PROXY protocol для внешнего dest)
   jq -n \
     --arg uuid "$uuid" \
     --arg domain "$DOMAIN" \
+    --arg dest_domain "$DEST_DOMAIN" \
     --arg priv_key "$priv_key" \
     --arg short_id "$short_id" \
     '{
@@ -764,27 +770,18 @@ generate_xray_config() {
                 "email": "main"
               }
             ],
-            "decryption": "none",
-            "fallbacks": [
-              {
-                "alpn": "h2",
-                "dest": "127.0.0.1:8080",
-                "xver": 1
-              },
-              {
-                "dest": "127.0.0.1:8080",
-                "xver": 1
-              }
-            ]
+            "decryption": "none"
           },
           "streamSettings": {
             "network": "tcp",
             "security": "reality",
             "realitySettings": {
               "show": false,
-              "dest": "127.0.0.1:8080",
-              "xver": 1,
-              "serverNames": [$domain],
+              "dest": ($dest_domain + ":443"),
+              "serverNames": [
+                $domain,
+                $dest_domain
+              ],
               "privateKey": $priv_key,
               "shortIds": [$short_id]
             }
@@ -801,7 +798,7 @@ generate_xray_config() {
       ]
     }' > "$tmp_config"
   
-  [[ ! -s "$tmp_config" ]] && print_error "Временный файл пустой"
+  [[ ! -s "$tmp_config" ]] && print_error "Временный файл пустой")
   
   if ! jq empty "$tmp_config" 2>/dev/null; then
     print_error "Невалидный JSON:\n$(jq empty "$tmp_config" 2>&1)\n$(cat "$tmp_config")"
@@ -906,7 +903,6 @@ get_params() {
 generate_link() {
   local uuid="$1" email="$2"
   IFS='|' read -r pk sid dom port ip < <(get_params 2>/dev/null || echo "|||443|127.0.0.1")
-  # ИСПРАВЛЕНО: ссылка для Vision (flow + fp)
   echo "vless://${uuid}@${ip}:${port}?security=reality&encryption=none&pbk=${pk}&fp=chrome&sni=${dom}&sid=${sid}&flow=xtls-rprx-vision#${email}"
 }
 
@@ -976,15 +972,17 @@ user rm      Удалить пользователя
 • Port: 443
 • TLS: true (uTLS fingerprint: chrome)
 
-СХЕМА
-Xray:443 (Vision+Reality) → fallback → Caddy:8080 (сайт)
+СХЕМА REALITY
+• Xray:443 принимает VLESS + Vision + Reality
+• Dest: www.microsoft.com:443 (маскировка TLS)
+• ServerNames: ваш домен + dest домен
+• Клиенты подключаются по SNI=ваш_домен
 
 ДИАГНОСТИКА
-systemctl status xray    # статус Xray
-systemctl status caddy   # статус Caddy
-xray run -test -c /usr/local/etc/xray/config.json  # проверка конфига
-ss -tlnp | grep 443      # кто слушает 443
-journalctl -u xray -f    # логи Xray
+systemctl status xray
+ss -tlnp | grep 443
+xray run -test -c /usr/local/etc/xray/config.json
+journalctl -u xray -f
 EOF_HELP
   chmod 644 "$HELP_FILE"
   print_success "Файл помощи создан"
@@ -1000,7 +998,7 @@ get_key_param() {
 main() {
   echo -e "
 ${BOLD}${SOFT_BLUE}Xray VLESS/Vision/Reality Installer${RESET}"
-  echo -e "${LIGHT_GRAY}v4.1 • Стабильная схема Vision+Reality • Рабочий конфиг${RESET}"
+  echo -e "${LIGHT_GRAY}v4.2 • Правильный Reality dest • Рабочий конфиг${RESET}"
   echo -e "${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}
 "
   
@@ -1032,10 +1030,10 @@ ${BOLD}${SOFT_BLUE}Xray VLESS/Vision/Reality Installer${RESET}"
   print_step "Маскировка"
   create_masking_site
   
-  print_step "Caddy (fallback)"
+  print_step "Caddy (HTTP :80)"
   install_caddy; configure_caddy
   
-  print_step "Xray (Vision + Reality)"
+  print_step "Xray (Vision + Reality :443)"
   install_xray; generate_xray_config
   
   setup_auto_updates
@@ -1056,17 +1054,16 @@ ${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━�
   echo -e "${BOLD}${SOFT_GREEN}✓ Установка завершена${RESET}"
   echo -e "${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}
 "
-  # ИСПРАВЛЕНО: https:// в домене
   echo -e "${BOLD}URL:${RESET}       https://${final_domain}"
   echo -e "${BOLD}IP:${RESET}        ${final_ip}"
   echo -e "${BOLD}UUID:${RESET}      ${final_uuid}"
   echo -e "${BOLD}PublicKey:${RESET} ${final_pk}"
   echo -e "${BOLD}ShortID:${RESET}   ${final_sid}"
   echo -e "${BOLD}Flow:${RESET}      xtls-rprx-vision"
+  echo -e "${BOLD}Dest:${RESET}      ${DEST_DOMAIN} (маскировка)"
   echo
   
   if [[ -n "$final_uuid" && "$final_uuid" != "ОШИБКА" && -n "$final_pk" && "$final_pk" != "ОШИБКА" ]]; then
-    # ИСПРАВЛЕНО: ссылка для Vision (без path, с flow)
     local conn="vless://${final_uuid}@${final_ip}:443?security=reality&encryption=none&pbk=${final_pk}&fp=chrome&sni=${final_domain}&sid=${final_sid}&flow=xtls-rprx-vision#main"
     echo -e "${BOLD}Ссылка:${RESET}\n${LIGHT_GRAY}${conn}${RESET}\n"
     echo -e "${BOLD}QR-код:${RESET}"; echo "$conn" | qrencode -t ansiutf8; echo
