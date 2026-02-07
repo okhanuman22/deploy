@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# Xray VLESS/Vision/Reality Installer (v4.2 — правильный Reality dest)
+# Xray VLESS/Vision/Reality Installer (v4.3 — Steal-Itself с fallback)
 # ============================================================================
 DARK_GRAY='\033[38;5;242m'
 SOFT_BLUE='\033[38;5;67m'
@@ -113,9 +113,10 @@ readonly XRAY_DAT_DIR="/usr/local/share/xray"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
 readonly SITE_DIR="/var/www/html"
 readonly HELP_FILE="${HOME}/help"
+readonly FALLBACK_PORT=8080  # ← НОВОЕ: порт для fallback
 
 export DOMAIN="${DOMAIN:-}"
-export DEST_DOMAIN="${DEST_DOMAIN:-www.microsoft.com}"  # ИСПРАВЛЕНО: внешний dest для Reality
+export DEST_DOMAIN="${DEST_DOMAIN:-www.microsoft.com}"
 SERVER_IP=""
 REBOOT_REQUIRED=0
 
@@ -212,7 +213,7 @@ configure_firewall() {
   ufw default allow outgoing &>/dev/null || true
   ufw allow 22/tcp comment "SSH" &>/dev/null || true
   ufw allow 80/tcp comment "HTTP" &>/dev/null || true
-  ufw allow 443/tcp comment "HTTPS" &>/dev/null || true
+  ufw allow 443/tcp comment "HTTPS/Reality" &>/dev/null || true
   ! ufw status | grep -q "Status: active" && ufw --force enable &>/dev/null
   print_success "UFW активен"
 }
@@ -563,11 +564,9 @@ install_caddy() {
       systemctl stop "$svc" &>/dev/null; systemctl disable "$svc" &>/dev/null
     }
   done
-  # ИСПРАВЛЕНО: освобождаем только порт 80
-  for port in 80; do
-    local pid=$(ss -tlnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p {print $7}' | head -n1 | cut -d',' -f2 | cut -d'=' -f2 || echo "")
-    [[ -n "$pid" && "$pid" != "1" && "$pid" != "-" ]] && kill -9 "$pid" 2>/dev/null || true
-  done
+  # Освобождаем fallback порт если занят
+  local pid=$(ss -tlnp 2>/dev/null | awk -v p=":${FALLBACK_PORT}" '$4 ~ p {print $7}' | head -n1 | cut -d',' -f2 | cut -d'=' -f2 || echo "")
+  [[ -n "$pid" && "$pid" != "1" && "$pid" != "-" ]] && kill -9 "$pid" 2>/dev/null || true
   sleep 2
   command -v caddy &>/dev/null && { print_info "✓ Уже установлен ($(caddy version | head -n1 | cut -d' ' -f1))"; return 0; }
   ensure_dependency "debian-keyring" "-"
@@ -585,7 +584,7 @@ install_caddy() {
 }
 
 configure_caddy() {
-  print_substep "Настройка Caddy"
+  print_substep "Настройка Caddy (fallback)"
   [[ -z "${DOMAIN:-}" ]] && print_error "DOMAIN не установлен!"
   
   mkdir -p /var/log/caddy
@@ -597,15 +596,15 @@ configure_caddy() {
     useradd -r -s /usr/sbin/nologin -d /var/lib/caddy -U caddy 2>/dev/null || true
   fi
 
-  # ИСПРАВЛЕНО: Caddy только на 80 порт (HTTP), без HTTPS
-  # Reality сам обрабатывает TLS на 443!
+  # ← ИЗМЕНЕНО: Caddy только на localhost:fallback_port (HTTP)
+  # Нет SSL, нет внешнего доступа — только fallback от Xray
   cat > "$CADDYFILE" <<EOF
 {
     admin off
     auto_https off
 }
-:80 {
-    bind 0.0.0.0
+127.0.0.1:${FALLBACK_PORT} {
+    bind 127.0.0.1
     root * ${SITE_DIR}
     file_server
     encode zstd gzip
@@ -639,7 +638,7 @@ EOF
   sleep 2
   
   if systemctl is-active --quiet caddy; then
-    print_success "Caddy запущен на порту 80 (HTTP)"
+    print_success "Caddy запущен на 127.0.0.1:${FALLBACK_PORT} (fallback only)"
   else
     journalctl -u caddy -n 30 --no-pager | tail -n 25 | sed "s/^/  ${MEDIUM_GRAY}│${RESET} /"
     print_error "Caddy не запущен"
@@ -683,12 +682,13 @@ generate_uuid_safe() {
   echo "$uuid"
 }
 
-# ИСПРАВЛЕНО: правильная конфигурация Reality
+# ← ИЗМЕНЕНО: Steal-Itself с fallback на Caddy
 generate_xray_config() {
-  print_substep "Генерация конфигурации"
+  print_substep "Генерация конфигурации (Steal-Itself)"
   [[ -z "${DOMAIN:-}" ]] && print_error "CRITICAL: DOMAIN пустой!"
   print_debug "DOMAIN = [$DOMAIN]"
   print_debug "DEST_DOMAIN = [$DEST_DOMAIN]"
+  print_debug "FALLBACK_PORT = [$FALLBACK_PORT]"
   
   mkdir -p /usr/local/etc/xray "$XRAY_DAT_DIR"
   local uuid priv_key pub_key short_id
@@ -738,16 +738,16 @@ generate_xray_config() {
   
   local tmp_config="/tmp/xray-config-$$-${RANDOM}.json"
   
-  # ИСПРАВЛЕНО: правильная конфигурация Reality
-  # - dest: внешний домен (www.microsoft.com) для маскировки TLS fingerprint
-  # - serverNames: наш домен для подключения клиентов
-  # - xver: 0 (без PROXY protocol для внешнего dest)
+  # ← ИЗМЕНЕНО: Steal-Itself конфигурация с fallback
+  # - dest: внешний домен для маскировки TLS (microsoft.com)
+  # - fallback: на localhost:Caddy для невалидных запросов
   jq -n \
     --arg uuid "$uuid" \
     --arg domain "$DOMAIN" \
     --arg dest_domain "$DEST_DOMAIN" \
     --arg priv_key "$priv_key" \
     --arg short_id "$short_id" \
+    --arg fallback_port "$FALLBACK_PORT" \
     '{
       "log": {"loglevel": "warning"},
       "routing": {
@@ -770,7 +770,13 @@ generate_xray_config() {
                 "email": "main"
               }
             ],
-            "decryption": "none"
+            "decryption": "none",
+            "fallbacks": [
+              {
+                "dest": "127.0.0.1:" + $fallback_port,
+                "xver": 0
+              }
+            ]
           },
           "streamSettings": {
             "network": "tcp",
@@ -824,7 +830,7 @@ generate_xray_config() {
   sleep 3
   
   if systemctl is-active --quiet xray; then
-    print_success "Xray запущен на порту 443 (Vision + Reality)"
+    print_success "Xray запущен на порту 443 (Vision + Reality + Fallback)"
   else
     journalctl -u xray -n 30 --no-pager | tail -n 20 | sed "s/^/  ${MEDIUM_GRAY}│${RESET} /"
     print_error "Xray не запущен"
@@ -972,17 +978,18 @@ user rm      Удалить пользователя
 • Port: 443
 • TLS: true (uTLS fingerprint: chrome)
 
-СХЕМА REALITY
-• Xray:443 принимает VLESS + Vision + Reality
-• Dest: www.microsoft.com:443 (маскировка TLS)
-• ServerNames: ваш домен + dest домен
-• Клиенты подключаются по SNI=ваш_домен
+СХЕМА STEAL-ITSELF (Reality + Fallback)
+• Xray:443 принимает все соединения
+• Валидные клиенты → прокси → интернет
+• Невалидные запросы → fallback:8080 → Caddy (маскировочный сайт)
+• Caddy слушает только 127.0.0.1:8080 (нет внешнего доступа)
 
 ДИАГНОСТИКА
-systemctl status xray
-ss -tlnp | grep 443
+systemctl status xray caddy
+ss -tlnp | grep -E ':(443|8080)'
 xray run -test -c /usr/local/etc/xray/config.json
 journalctl -u xray -f
+curl -H "Host: ваш-домен.com" https://127.0.0.1:8080  # тест fallback
 EOF_HELP
   chmod 644 "$HELP_FILE"
   print_success "Файл помощи создан"
@@ -998,7 +1005,7 @@ get_key_param() {
 main() {
   echo -e "
 ${BOLD}${SOFT_BLUE}Xray VLESS/Vision/Reality Installer${RESET}"
-  echo -e "${LIGHT_GRAY}v4.2 • Правильный Reality dest • Рабочий конфиг${RESET}"
+  echo -e "${LIGHT_GRAY}v4.3 • Steal-Itself с fallback • Рабочий конфиг${RESET}"
   echo -e "${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}
 "
   
@@ -1030,10 +1037,11 @@ ${BOLD}${SOFT_BLUE}Xray VLESS/Vision/Reality Installer${RESET}"
   print_step "Маскировка"
   create_masking_site
   
-  print_step "Caddy (HTTP :80)"
+  # ← ИЗМЕНЕНО: Сначала Caddy (fallback), потом Xray (чтобы занял 443)
+  print_step "Caddy (fallback на 127.0.0.1:${FALLBACK_PORT})"
   install_caddy; configure_caddy
   
-  print_step "Xray (Vision + Reality :443)"
+  print_step "Xray (Vision + Reality :443 + fallback)"
   install_xray; generate_xray_config
   
   setup_auto_updates
@@ -1054,13 +1062,14 @@ ${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━�
   echo -e "${BOLD}${SOFT_GREEN}✓ Установка завершена${RESET}"
   echo -e "${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}
 "
-  echo -e "${BOLD}URL:${RESET}       https://${final_domain}"
+  echo -e "${BOLD}URL:${RESET}       https://${final_domain} (Reality + fallback)"
   echo -e "${BOLD}IP:${RESET}        ${final_ip}"
   echo -e "${BOLD}UUID:${RESET}      ${final_uuid}"
   echo -e "${BOLD}PublicKey:${RESET} ${final_pk}"
   echo -e "${BOLD}ShortID:${RESET}   ${final_sid}"
   echo -e "${BOLD}Flow:${RESET}      xtls-rprx-vision"
-  echo -e "${BOLD}Dest:${RESET}      ${DEST_DOMAIN} (маскировка)"
+  echo -e "${BOLD}Dest:${RESET}      ${DEST_DOMAIN} (маскировка TLS)"
+  echo -e "${BOLD}Fallback:${RESET}  127.0.0.1:${FALLBACK_PORT} → Caddy (маскировка)"
   echo
   
   if [[ -n "$final_uuid" && "$final_uuid" != "ОШИБКА" && -n "$final_pk" && "$final_pk" != "ОШИБКА" ]]; then
@@ -1071,7 +1080,8 @@ ${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━�
     echo -e "${SOFT_RED}⚠ Ошибка в параметрах${RESET}"
   fi
   
-  echo -e "Проверка:     ${BOLD}systemctl status xray${RESET}"
+  echo -e "Проверка:     ${BOLD}systemctl status xray caddy${RESET}"
+  echo -e "Порты:        ${BOLD}ss -tlnp | grep -E ':(443|${FALLBACK_PORT})'${RESET}"
   echo -e "Управление:   ${BOLD}user list${RESET} | ${BOLD}user add${RESET} | ${BOLD}user qr${RESET}"
   echo -e "Помощь:       ${BOLD}cat ~/help${RESET}"; echo
   
