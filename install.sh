@@ -798,7 +798,7 @@ generate_xray_config() {
       ]
     }' > "$tmp_config"
   
-  [[ ! -s "$tmp_config" ]] && print_error "Временный файл пустой")
+  [[ ! -s "$tmp_config" ]] && print_error "Временный файл пустой"
   
   if ! jq empty "$tmp_config" 2>/dev/null; then
     print_error "Невалидный JSON:\n$(jq empty "$tmp_config" 2>&1)\n$(cat "$tmp_config")"
