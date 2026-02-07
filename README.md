@@ -9,7 +9,7 @@
 ### 🚀 Как использовать:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/okhanuman22/deploy/main/install.sh -o install.sh | sudo -E bash
+curl -fsSL https://raw.githubusercontent.com/okhanuman22/deploy/main/install.sh -o install.sh && sudo -E bash install.sh
 ```
 
 ### 👥 Управление пользователями:
