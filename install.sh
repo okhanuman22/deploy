@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# Xray VLESS/XHTTP/Reality Installer (v4.0 — исправлен порт 443, современный сайт)
+# Xray VLESS/Vision/Reality + XHTTP Installer (v4.1 — исправлена схема подключения)
 # ============================================================================
 DARK_GRAY='\033[38;5;242m'
 SOFT_BLUE='\033[38;5;67m'
@@ -251,7 +251,7 @@ prompt_domain() {
     validate_domain "$DOMAIN"; return
   fi
   if [[ -f "$XRAY_CONFIG" ]] && command -v jq &>/dev/null; then
-    local existing_domain=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0] // ""' "$XRAY_CONFIG" 2>/dev/null || echo "")
+    local existing_domain=$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0] // ""' "$XRAY_CONFIG" 2>/dev/null || echo "")
     existing_domain=$(sanitize_domain "$existing_domain")
     if [[ -n "$existing_domain" && "$existing_domain" != "null" && "$existing_domain" != "example.com" && "$existing_domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
       export DOMAIN="$existing_domain"; SERVER_IP=$(get_public_ip)
@@ -291,7 +291,6 @@ validate_domain() {
   print_success "Домен: ${DOMAIN}"; print_info "IP-адрес сервера: ${SERVER_IP}"
 }
 
-# ИСПРАВЛЕНО: современный сайт маскировки
 create_masking_site() {
   print_substep "Маскировочный сайт"
   mkdir -p "$SITE_DIR"
@@ -488,7 +487,6 @@ create_masking_site() {
     <div class="loading" id="loader">
         <div class="spinner"></div>
     </div>
-
     <section class="hero">
         <div class="hero-content">
             <h1>Secure Cloud Infrastructure</h1>
@@ -496,43 +494,26 @@ create_masking_site() {
             <a href="#features" class="cta-button">Explore Solutions</a>
         </div>
     </section>
-
     <section class="features" id="features">
         <h2>Why Choose CloudSync?</h2>
         <div class="feature-grid">
             <div class="feature-card">
                 <div class="feature-icon">🔒</div>
                 <h3>End-to-End Encryption</h3>
-                <p>AES-256 encryption ensures your data remains private and secure during transmission and storage.</p>
+                <p>AES-256 encryption ensures your data remains private and secure.</p>
             </div>
             <div class="feature-card">
                 <div class="feature-icon">⚡</div>
                 <h3>Lightning Fast</h3>
-                <p>Global CDN network with edge caching delivers content in milliseconds from 200+ locations worldwide.</p>
+                <p>Global CDN network with edge caching delivers content in milliseconds.</p>
             </div>
             <div class="feature-card">
                 <div class="feature-icon">🛡️</div>
                 <h3>DDoS Protection</h3>
-                <p>Advanced threat mitigation filters out malicious traffic while ensuring legitimate users stay connected.</p>
-            </div>
-            <div class="feature-card">
-                <div class="feature-icon">📊</div>
-                <h3>Real-time Analytics</h3>
-                <p>Comprehensive dashboard with insights into performance, usage patterns, and security events.</p>
-            </div>
-            <div class="feature-card">
-                <div class="feature-icon">🔄</div>
-                <h3>Auto Scaling</h3>
-                <p>Infrastructure automatically scales to meet demand, from hundreds to millions of requests per second.</p>
-            </div>
-            <div class="feature-card">
-                <div class="feature-icon">🌍</div>
-                <h3>Global Presence</h3>
-                <p>Data centers across 6 continents ensure low latency and compliance with local regulations.</p>
+                <p>Advanced threat mitigation filters out malicious traffic.</p>
             </div>
         </div>
     </section>
-
     <section class="stats">
         <div class="stats-grid">
             <div class="stat-item">
@@ -544,67 +525,36 @@ create_masking_site() {
                 <p>Avg. Latency</p>
             </div>
             <div class="stat-item">
-                <h3>10PB+</h3>
-                <p>Data Processed</p>
-            </div>
-            <div class="stat-item">
                 <h3>24/7</h3>
                 <p>Expert Support</p>
             </div>
         </div>
     </section>
-
     <footer>
         <p>&copy; 2026 CloudSync Technologies. All rights reserved.</p>
-        <p style="margin-top: 0.5rem; font-size: 0.9rem;">Enterprise Cloud Infrastructure Solutions</p>
     </footer>
-
     <script>
         window.addEventListener('load', () => {
-            setTimeout(() => {
-                document.getElementById('loader').classList.add('hidden');
-            }, 500);
+            setTimeout(() => document.getElementById('loader').classList.add('hidden'), 500);
         });
-
         document.querySelectorAll('a[href^="#"]').forEach(anchor => {
             anchor.addEventListener('click', function (e) {
                 e.preventDefault();
-                const target = document.querySelector(this.getAttribute('href'));
-                if (target) {
-                    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                }
+                document.querySelector(this.getAttribute('href'))?.scrollIntoView({ behavior: 'smooth' });
             });
-        });
-
-        const observerOptions = { threshold: 0.1, rootMargin: '0px 0px -50px 0px' };
-        const observer = new IntersectionObserver((entries) => {
-            entries.forEach(entry => {
-                if (entry.isIntersecting) {
-                    entry.target.style.opacity = '1';
-                    entry.target.style.transform = 'translateY(0)';
-                }
-            });
-        }, observerOptions);
-
-        document.querySelectorAll('.feature-card').forEach((card, index) => {
-            card.style.opacity = '0';
-            card.style.transform = 'translateY(30px)';
-            card.style.transition = `opacity 0.6s ease ${index * 0.1}s, transform 0.6s ease ${index * 0.1}s`;
-            observer.observe(card);
         });
     </script>
 </body>
 </html>
 EOF_SITE
 
-  echo -e "User-agent: *\nDisallow: /api/\nDisallow: /admin/\nDisallow: /internal/" > "$SITE_DIR/robots.txt"
+  echo -e "User-agent: *\nDisallow: /" > "$SITE_DIR/robots.txt"
   printf '\x00\x00\x00\x00' > "$SITE_DIR/favicon.ico" 2>/dev/null || true
   chown -R www-data:www-data "$SITE_DIR" 2>/dev/null || true
   chmod -R 755 "$SITE_DIR"
-  print_success "Сайт создан (современный дизайн)"
+  print_success "Сайт создан"
 }
 
-# ИСПРАВЛЕНО: Caddy на порту 8080 (fallback), Xray на 443
 install_caddy() {
   print_substep "Caddy"
   for svc in nginx apache2 httpd; do
@@ -612,7 +562,6 @@ install_caddy() {
       systemctl stop "$svc" &>/dev/null; systemctl disable "$svc" &>/dev/null
     }
   done
-  # ИСПРАВЛЕНО: освобождаем только порт 80 для Caddy (для получения SSL)
   for port in 80; do
     local pid=$(ss -tlnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p {print $7}' | head -n1 | cut -d',' -f2 | cut -d'=' -f2 || echo "")
     [[ -n "$pid" && "$pid" != "1" && "$pid" != "-" ]] && kill -9 "$pid" 2>/dev/null || true
@@ -633,7 +582,6 @@ install_caddy() {
   print_success "Caddy установлен ($(caddy version | head -n1 | cut -d' ' -f1))"
 }
 
-# ИСПРАВЛЕНО: Caddy слушает только localhost:8080 (fallback для Xray)
 configure_caddy() {
   print_substep "Настройка Caddy"
   [[ -z "${DOMAIN:-}" ]] && print_error "DOMAIN не установлен!"
@@ -647,7 +595,7 @@ configure_caddy() {
     useradd -r -s /usr/sbin/nologin -d /var/lib/caddy -U caddy 2>/dev/null || true
   fi
 
-  # ИСПРАВЛЕНО: Caddy только на localhost:8080 (не слушает 443!)
+  # Caddy только на localhost:8080 для fallback
   cat > "$CADDYFILE" <<EOF
 {
     admin off
@@ -689,10 +637,10 @@ EOF
   sleep 2
   
   if systemctl is-active --quiet caddy; then
-    print_success "Caddy запущен на 127.0.0.1:8080 (fallback)"
+    print_success "Caddy запущен на 127.0.0.1:8080"
   else
     journalctl -u caddy -n 30 --no-pager | tail -n 25 | sed "s/^/  ${MEDIUM_GRAY}│${RESET} /"
-    print_error "Caddy не запущен (см. логи выше)"
+    print_error "Caddy не запущен"
   fi
 }
 
@@ -707,7 +655,7 @@ install_xray() {
     print_error "Не удалось установить Xray"
   fi
   if ! bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata &>/dev/null; then
-    print_warning "Не удалось установить геофайлы (повторная попытка)..."
+    print_warning "Не удалось установить геофайлы..."
     bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata &>/dev/null || true
   fi
   local version=$(xray version 2>/dev/null | head -n1 | cut -d' ' -f1-3 || echo "unknown")
@@ -718,99 +666,80 @@ generate_uuid_safe() {
   echo "[DEBUG] Проверка энтропии" >&2
   local avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo "0")
   if [[ "$avail" -lt 200 ]]; then
-    echo "⚠ Низкая энтропия (${avail} бит). Устанавливаем haveged..." >&2
+    echo "⚠ Низкая энтропия (${avail} бит)" >&2
     ensure_dependency "haveged" "haveged"
     systemctl start haveged &>/dev/null || true; sleep 2
     avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo "0")
-    echo "ℹ Энтропия: ${avail} бит" >&2
-  else
-    echo "ℹ Энтропия достаточна (${avail} бит)" >&2
   fi
-  echo "ℹ Генерация UUID через 'xray uuid' (таймаут 20 сек)..." >&2
+  echo "ℹ Генерация UUID..." >&2
   local uuid
   if ! uuid=$(timeout 20 xray uuid 2>/dev/null); then
-    echo "✗ Генерация UUID превысила 20 секунд." >&2
-    echo "Возможные причины:" >&2
-    echo "• Недостаток энтропии" >&2
-    echo "• Проблемы с /dev/random" >&2
-    exit 1
+    echo "✗ Таймаут генерации UUID" >&2; exit 1
   fi
   [[ -z "$uuid" || ! "$uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] && \
     { echo "✗ Некорректный UUID: '$uuid'" >&2; exit 1; }
   echo "$uuid"
 }
 
+# ИСПРАВЛЕНО: правильная схема VLESS + Vision + Reality (без XHTTP!)
 generate_xray_config() {
   print_substep "Генерация конфигурации"
   [[ -z "${DOMAIN:-}" ]] && print_error "CRITICAL: DOMAIN пустой!"
   print_debug "DOMAIN = [$DOMAIN]"
   
   mkdir -p /usr/local/etc/xray "$XRAY_DAT_DIR"
-  local secret_path uuid priv_key pub_key short_id
+  local uuid priv_key pub_key short_id
   
   if [[ -f "$XRAY_KEYS" ]]; then
-    secret_path=$(sed 's/\x1b\[[0-9;]*m//g' "$XRAY_KEYS" 2>/dev/null | grep "^path:" | awk '{print $2}' | sed 's|/||')
     uuid=$(sed 's/\x1b\[[0-9;]*m//g' "$XRAY_KEYS" 2>/dev/null | grep "^uuid:" | awk '{print $2}')
     priv_key=$(sed 's/\x1b\[[0-9;]*m//g' "$XRAY_KEYS" 2>/dev/null | grep "^private_key:" | awk '{print $2}')
     pub_key=$(sed 's/\x1b\[[0-9;]*m//g' "$XRAY_KEYS" 2>/dev/null | grep "^public_key:" | awk '{print $2}')
     short_id=$(sed 's/\x1b\[[0-9;]*m//g' "$XRAY_KEYS" 2>/dev/null | grep "^short_id:" | awk '{print $2}')
     
-    if [[ -n "$secret_path" && -n "$uuid" && "$uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ && -n "$priv_key" && -n "$pub_key" && -n "$short_id" ]]; then
-      print_info "Используются существующие параметры из ${XRAY_KEYS}"
+    if [[ -n "$uuid" && "$uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ && -n "$priv_key" && -n "$pub_key" && -n "$short_id" ]]; then
+      print_info "Используются существующие параметры"
     else
-      [[ -z "$secret_path" ]] && print_warning "path пустой или невалидный в .keys"
-      [[ -z "$uuid" ]] && print_warning "uuid пустой в .keys"
-      [[ -n "$uuid" && ! "$uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] && print_warning "uuid имеет неверный формат: [$uuid]"
-      [[ -z "$priv_key" ]] && print_warning "private_key пустой в .keys"
-      [[ -z "$pub_key" ]] && print_warning "public_key пустой в .keys"
-      [[ -z "$short_id" ]] && print_warning "short_id пустой в .keys"
-      print_warning "Невалидные параметры в ${XRAY_KEYS}, генерируем новые"
+      print_warning "Невалидные параметры, генерируем новые"
       rm -f "$XRAY_KEYS" 2>/dev/null || true
     fi
   fi
   
   if [[ ! -f "$XRAY_KEYS" || ! -s "$XRAY_KEYS" ]]; then
-    secret_path=$(openssl rand -hex 4 2>/dev/null)
     print_info "Генерация UUID..."
     uuid=$(generate_uuid_safe)
-    print_success "UUID сгенерирован: ${uuid:0:8}..."
+    print_success "UUID: ${uuid:0:8}..."
     
     print_info "Генерация X25519 ключей..."
     local key_pair
-    key_pair=$(xray x25519 2>&1) || print_error "Не удалось сгенерировать ключи Reality:\n${key_pair}"
+    key_pair=$(xray x25519 2>&1) || print_error "Не удалось сгенерировать ключи:\n${key_pair}"
     priv_key=$(echo "$key_pair" | grep -i "^PrivateKey" | awk '{print $NF}' | head -n1)
     pub_key=$(echo "$key_pair" | grep -i "^Password" | awk '{print $NF}' | head -n1)
     
-    [[ -z "$priv_key" || "${#priv_key}" -lt 40 ]] && print_error "Некорректный PrivateKey: [$priv_key]"
-    [[ -z "$pub_key" || "${#pub_key}" -lt 40 ]] && print_error "Некорректный Password: [$pub_key]"
+    [[ -z "$priv_key" || "${#priv_key}" -lt 40 ]] && print_error "Некорректный PrivateKey"
+    [[ -z "$pub_key" || "${#pub_key}" -lt 40 ]] && print_error "Некорректный PublicKey"
     
     short_id=$(openssl rand -hex 4 2>/dev/null || echo "a1b2c3d4")
     
     {
-      printf 'path: /%s\n' "$secret_path"
       printf 'uuid: %s\n' "$uuid"
       printf 'private_key: %s\n' "$priv_key"
       printf 'public_key: %s\n' "$pub_key"
       printf 'short_id: %s\n' "$short_id"
     } > "$XRAY_KEYS"
     chmod 600 "$XRAY_KEYS"
-    print_success "Сгенерированы новые параметры"
+    print_success "Ключи сгенерированы"
   fi
   
   [[ ! "$uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] && \
     print_error "CRITICAL: UUID невалидный: [$uuid]"
   
   local tmp_config="/tmp/xray-config-$$-${RANDOM}.json"
-  print_debug "Генерация конфига с параметрами:"
-  print_debug "  UUID: ${uuid:0:8}..."
-  print_debug "  DOMAIN: ${DOMAIN}"
-  print_debug "  Secret path: /${secret_path}"
   
-  # ИСПРАВЛЕНО: Xray слушает 443, fallback на Caddy localhost:8080
+  # ИСПРАВЛЕНО: VLESS + Vision + Reality (flow: xtls-rprx-vision)
+  # Это стабильная и рабочая комбинация!
   jq -n \
     --arg uuid "$uuid" \
     --arg domain "$DOMAIN" \
-    --arg secret_path "$secret_path" \
     --arg priv_key "$priv_key" \
     --arg short_id "$short_id" \
     '{
@@ -824,23 +753,17 @@ generate_xray_config() {
       },
       "inbounds": [
         {
-          "listen": "@xhttp",
-          "protocol": "vless",
-          "settings": {
-            "decryption": "none",
-            "clients": [{"id": $uuid, "email": "main"}]
-          },
-          "streamSettings": {
-            "network": "xhttp",
-            "xhttpSettings": {"path": ("/" + $secret_path)}
-          },
-          "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"]}
-        },
-        {
           "listen": "0.0.0.0",
           "port": 443,
           "protocol": "vless",
           "settings": {
+            "clients": [
+              {
+                "id": $uuid,
+                "flow": "xtls-rprx-vision",
+                "email": "main"
+              }
+            ],
             "decryption": "none",
             "fallbacks": [
               {
@@ -865,6 +788,10 @@ generate_xray_config() {
               "privateKey": $priv_key,
               "shortIds": [$short_id]
             }
+          },
+          "sniffing": {
+            "enabled": true,
+            "destOverride": ["http", "tls", "quic"]
           }
         }
       ],
@@ -874,22 +801,22 @@ generate_xray_config() {
       ]
     }' > "$tmp_config"
   
-  [[ ! -s "$tmp_config" ]] && print_error "Временный файл конфигурации пустой"
+  [[ ! -s "$tmp_config" ]] && print_error "Временный файл пустой"
   
   if ! jq empty "$tmp_config" 2>/dev/null; then
-    print_error "Невалидный JSON в конфигурации:\n$(jq empty "$tmp_config" 2>&1)\nСодержимое:\n$(cat "$tmp_config")"
+    print_error "Невалидный JSON:\n$(jq empty "$tmp_config" 2>&1)\n$(cat "$tmp_config")"
   fi
   
-  mv "$tmp_config" "$XRAY_CONFIG" || print_error "Не удалось переместить конфиг"
+  mv "$tmp_config" "$XRAY_CONFIG" || print_error "Не удалось сохранить конфиг"
   chown root:root "$XRAY_CONFIG" 2>/dev/null || true
   chmod 644 "$XRAY_CONFIG"
   
-  print_info "Валидация конфигурации Xray..."
+  print_info "Валидация Xray..."
   if ! xray run -test -c "$XRAY_CONFIG" &>/dev/null; then
-    print_error "Ошибка валидации Xray:\n$(xray run -test -c "$XRAY_CONFIG" 2>&1)"
+    print_error "Ошибка валидации:\n$(xray run -test -c "$XRAY_CONFIG" 2>&1)"
   fi
   
-  print_success "Конфигурация Xray валидна"
+  print_success "Конфигурация валидна"
   
   if systemctl is-active --quiet xray 2>/dev/null; then
     systemctl restart xray &>/dev/null || print_error "Не удалось перезапустить Xray"
@@ -900,10 +827,10 @@ generate_xray_config() {
   sleep 3
   
   if systemctl is-active --quiet xray; then
-    print_success "Xray запущен на порту 443"
+    print_success "Xray запущен на порту 443 (Vision + Reality)"
   else
     journalctl -u xray -n 30 --no-pager | tail -n 20 | sed "s/^/  ${MEDIUM_GRAY}│${RESET} /"
-    print_error "Не удалось запустить Xray"
+    print_error "Xray не запущен"
   fi
 }
 
@@ -967,20 +894,20 @@ XRAY_KEYS="/usr/local/etc/xray/.keys"
 ACTION="${1:-help}"
 
 get_params() {
-  local sp pk sid dom port ip
-  sp=$(sed 's/\x1b\[[0-9;]*m//g' "$XRAY_KEYS" 2>/dev/null | grep "^path:" | awk '{print $2}' | sed 's|/||' || echo "secret")
-  pk=$(sed 's/\x1b\[[0-9;]*m//g' "$XRAY_KEYS" 2>/dev/null | grep "^public_key:" | awk '{print $2}' || echo "pubkey")
-  sid=$(sed 's/\x1b\[[0-9;]*m//g' "$XRAY_KEYS" 2>/dev/null | grep "^short_id:" | awk '{print $2}' || echo "shortid")
-  dom=$(jq -r '.inbounds[1].streamSettings.realitySettings.serverNames[0] // "example.com"' "$XRAY_CONFIG" 2>/dev/null)
-  port=$(jq -r '.inbounds[1].port // "443"' "$XRAY_CONFIG" 2>/dev/null)
+  local pk sid dom port ip
+  pk=$(sed 's/\x1b\[[0-9;]*m//g' "$XRAY_KEYS" 2>/dev/null | grep "^public_key:" | awk '{print $2}' || echo "")
+  sid=$(sed 's/\x1b\[[0-9;]*m//g' "$XRAY_KEYS" 2>/dev/null | grep "^short_id:" | awk '{print $2}' || echo "")
+  dom=$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0] // ""' "$XRAY_CONFIG" 2>/dev/null)
+  port=$(jq -r '.inbounds[0].port // "443"' "$XRAY_CONFIG" 2>/dev/null)
   ip=$(curl -4s https://icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}')
-  echo "${sp}|${pk}|${sid}|${dom}|${port}|${ip}"
+  echo "${pk}|${sid}|${dom}|${port}|${ip}"
 }
 
 generate_link() {
   local uuid="$1" email="$2"
-  IFS='|' read -r sp pk sid dom port ip < <(get_params 2>/dev/null || echo "|||example.com|443|127.0.0.1")
-  echo "vless://${uuid}@${ip}:${port}?security=reality&encryption=none&pbk=${pk}&fp=chrome&sni=${dom}&sid=${sid}&type=xhttp&path=%2F${sp}%2F#${email}"
+  IFS='|' read -r pk sid dom port ip < <(get_params 2>/dev/null || echo "|||443|127.0.0.1")
+  # ИСПРАВЛЕНО: ссылка для Vision (flow + fp)
+  echo "vless://${uuid}@${ip}:${port}?security=reality&encryption=none&pbk=${pk}&fp=chrome&sni=${dom}&sid=${sid}&flow=xtls-rprx-vision#${email}"
 }
 
 case "$ACTION" in
@@ -993,12 +920,12 @@ case "$ACTION" in
   add) 
     read -p "Имя: " email < /dev/tty
     [[ -z "$email" || "$email" =~ [^a-zA-Z0-9_-] ]] && { echo "Неверное имя"; exit 1; }
-    jq -e ".inbounds[0].settings.clients[] | select(.email==\"$email\")" "$XRAY_CONFIG" &>/dev/null && { echo "Пользователь существует"; exit 1; }
+    jq -e ".inbounds[0].settings.clients[] | select(.email==\"$email\")" "$XRAY_CONFIG" &>/dev/null && { echo "Существует"; exit 1; }
     uuid=$(xray uuid)
-    jq --arg e "$email" --arg u "$uuid" '.inbounds[0].settings.clients += [{"id": $u, "email": $e}]' "$XRAY_CONFIG" > /tmp/x.tmp && mv /tmp/x.tmp "$XRAY_CONFIG"
+    jq --arg e "$email" --arg u "$uuid" '.inbounds[0].settings.clients += [{"id": $u, "flow": "xtls-rprx-vision", "email": $e}]' "$XRAY_CONFIG" > /tmp/x.tmp && mv /tmp/x.tmp "$XRAY_CONFIG"
     systemctl restart xray &>/dev/null || true
     link=$(generate_link "$uuid" "$email")
-    echo -e "\n✅ ${email} создан\nUUID: ${uuid}\nСсылка:\n$link"
+    echo -e "\n✅ ${email}\nUUID: ${uuid}\nСсылка:\n$link"
     echo "$link" | qrencode -t ansiutf8 ;;
   rm) 
     mapfile -t cl < <(jq -r '.inbounds[0].settings.clients[].email' "$XRAY_CONFIG" 2>/dev/null || echo "")
@@ -1034,7 +961,7 @@ EOF_SCRIPT
 
 create_help_file() {
   cat > "$HELP_FILE" <<'EOF_HELP'
-Xray (VLESS/XHTTP/Reality) — управление
+Xray (VLESS/Vision/Reality) — управление
 ========================================
 ОСНОВНЫЕ КОМАНДЫ
 user list    Список клиентов
@@ -1042,25 +969,22 @@ user qr      QR-код подключения
 user add     Новый пользователь
 user rm      Удалить пользователя
 
-АВТООБНОВЛЕНИЯ
-• Ядро: каждое воскресенье 03:00
-• Геофайлы: ежедневно 03:00
+ПАРАМЕТРЫ ПОДКЛЮЧЕНИЯ
+• Protocol: VLESS
+• Flow: xtls-rprx-vision
+• Security: reality
+• Port: 443
+• TLS: true (uTLS fingerprint: chrome)
 
-ФАЙЛЫ
-Конфиг:      /usr/local/etc/xray/config.json
-Параметры:   /usr/local/etc/xray/.keys
-Сайт:        /var/www/html/index.html
+СХЕМА
+Xray:443 (Vision+Reality) → fallback → Caddy:8080 (сайт)
 
-СХЕМА РАБОТЫ
-• Xray слушает 0.0.0.0:443 (Reality + VLESS)
-• Caddy слушает 127.0.0.1:8080 (fallback сайт)
-• Валидные клиенты → прокси
-• Невалидные → маскировочный сайт
-
-КЛЮЧИ REALITY
-• PrivateKey → в конфиге сервера
-• PublicKey (pbk) → для клиентов
-• ShortID → для клиентов
+ДИАГНОСТИКА
+systemctl status xray    # статус Xray
+systemctl status caddy   # статус Caddy
+xray run -test -c /usr/local/etc/xray/config.json  # проверка конфига
+ss -tlnp | grep 443      # кто слушает 443
+journalctl -u xray -f    # логи Xray
 EOF_HELP
   chmod 644 "$HELP_FILE"
   print_success "Файл помощи создан"
@@ -1075,8 +999,8 @@ get_key_param() {
 
 main() {
   echo -e "
-${BOLD}${SOFT_BLUE}Xray VLESS/XHTTP/Reality Installer${RESET}"
-  echo -e "${LIGHT_GRAY}v4.0 • Правильная схема портов • Современный сайт${RESET}"
+${BOLD}${SOFT_BLUE}Xray VLESS/Vision/Reality Installer${RESET}"
+  echo -e "${LIGHT_GRAY}v4.1 • Стабильная схема Vision+Reality • Рабочий конфиг${RESET}"
   echo -e "${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}
 "
   
@@ -1108,10 +1032,10 @@ ${BOLD}${SOFT_BLUE}Xray VLESS/XHTTP/Reality Installer${RESET}"
   print_step "Маскировка"
   create_masking_site
   
-  print_step "Caddy (fallback на :8080)"
+  print_step "Caddy (fallback)"
   install_caddy; configure_caddy
   
-  print_step "Xray (порт 443)"
+  print_step "Xray (Vision + Reality)"
   install_xray; generate_xray_config
   
   setup_auto_updates
@@ -1119,13 +1043,11 @@ ${BOLD}${SOFT_BLUE}Xray VLESS/XHTTP/Reality Installer${RESET}"
   print_step "Утилиты"
   create_user_utility; create_help_file
   
-  local final_uuid final_path final_domain final_ip final_pk final_sid
-  final_uuid=$(get_key_param "uuid"); final_path=$(get_key_param "path")
-  final_pk=$(get_key_param "public_key"); final_sid=$(get_key_param "short_id")
-  final_domain="$DOMAIN"; final_ip="$SERVER_IP"
+  local final_uuid final_domain final_ip final_pk final_sid
+  final_uuid=$(get_key_param "uuid"); final_pk=$(get_key_param "public_key")
+  final_sid=$(get_key_param "short_id"); final_domain="$DOMAIN"; final_ip="$SERVER_IP"
   
   [[ -z "$final_uuid" ]] && final_uuid="ОШИБКА"
-  [[ -z "$final_path" ]] && final_path="ОШИБКА"
   [[ -z "$final_pk" ]] && final_pk="ОШИБКА"
   [[ -z "$final_sid" ]] && final_sid="ОШИБКА"
   
@@ -1134,24 +1056,27 @@ ${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━�
   echo -e "${BOLD}${SOFT_GREEN}✓ Установка завершена${RESET}"
   echo -e "${DARK_GRAY}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}
 "
-  echo -e "${BOLD}Домен:${RESET}     ${final_domain}"
+  # ИСПРАВЛЕНО: https:// в домене
+  echo -e "${BOLD}URL:${RESET}       https://${final_domain}"
   echo -e "${BOLD}IP:${RESET}        ${final_ip}"
   echo -e "${BOLD}UUID:${RESET}      ${final_uuid}"
-  echo -e "${BOLD}Путь:${RESET}      ${final_path}"
   echo -e "${BOLD}PublicKey:${RESET} ${final_pk}"
   echo -e "${BOLD}ShortID:${RESET}   ${final_sid}"
+  echo -e "${BOLD}Flow:${RESET}      xtls-rprx-vision"
   echo
   
   if [[ -n "$final_uuid" && "$final_uuid" != "ОШИБКА" && -n "$final_pk" && "$final_pk" != "ОШИБКА" ]]; then
-    local conn="vless://${final_uuid}@${final_ip}:443?security=reality&encryption=none&pbk=${final_pk}&fp=chrome&sni=${final_domain}&sid=${final_sid}&type=xhttp&path=%2F${final_path//\//}%2F#main"
+    # ИСПРАВЛЕНО: ссылка для Vision (без path, с flow)
+    local conn="vless://${final_uuid}@${final_ip}:443?security=reality&encryption=none&pbk=${final_pk}&fp=chrome&sni=${final_domain}&sid=${final_sid}&flow=xtls-rprx-vision#main"
     echo -e "${BOLD}Ссылка:${RESET}\n${LIGHT_GRAY}${conn}${RESET}\n"
     echo -e "${BOLD}QR-код:${RESET}"; echo "$conn" | qrencode -t ansiutf8; echo
   else
-    echo -e "${SOFT_RED}⚠ Ошибка в параметрах, QR-код не сгенерирован${RESET}"
+    echo -e "${SOFT_RED}⚠ Ошибка в параметрах${RESET}"
   fi
   
-  echo -e "Управление: ${BOLD}user list${RESET} | ${BOLD}user add${RESET} | ${BOLD}user rm${RESET} | ${BOLD}user qr${RESET}"
-  echo -e "Помощь:     ${BOLD}cat ~/help${RESET}"; echo
+  echo -e "Проверка:     ${BOLD}systemctl status xray${RESET}"
+  echo -e "Управление:   ${BOLD}user list${RESET} | ${BOLD}user add${RESET} | ${BOLD}user qr${RESET}"
+  echo -e "Помощь:       ${BOLD}cat ~/help${RESET}"; echo
   
   [[ $REBOOT_REQUIRED -eq 1 ]] && echo -e "${SOFT_YELLOW}⚠ Перезагрузка: ${BOLD}reboot${RESET}\n"
   
